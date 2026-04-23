@@ -215,12 +215,6 @@ static void app_on_3d_cloud(const ld6002c_3d_cloud_t *cloud)
         return;
     }
 
-    ESP_LOGI(TAG, "Radar 3D cloud: targets=%ld", (long)cloud->target_num);
-    if (cloud->target_num > 0) {
-        const ld6002c_point_t *point = &cloud->points[0];
-        ESP_LOGI(TAG, "Radar cloud[0]: id=%ld x=%.2f y=%.2f z=%.2f speed=%.2f",
-                 (long)point->cluster_index, point->x, point->y, point->z, point->speed);
-    }
     ESP_ERROR_CHECK_WITHOUT_ABORT(oled_display_update_3d_cloud(cloud));
 }
 
