@@ -13,6 +13,7 @@
 
 #include "ld6002c.h"
 
+#include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
 #include "esp_log.h"
@@ -335,7 +336,7 @@ static void tf_dispatch(const tf_frame_t *frame)
             if (n > 32) n = 32;  /* 安全截断 */
             /* 每个目标: cluster_index(4) + x(4) + y(4) + z(4) + speed(4) = 20 字节 */
             if (frame->len < (uint16_t)(4 + n * 20)) {
-                ESP_LOGW(TAG, "3D cloud frame too short for %d points", n);
+                ESP_LOGW(TAG, "3D cloud frame too short for %" PRId32 " points", n);
                 n = 0;
                 cloud.target_num = 0;
             }
