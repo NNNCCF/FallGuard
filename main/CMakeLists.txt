@@ -8,6 +8,7 @@ idf_component_register(
         led_indicator
         wifi_manager
         ld6002c
+        oled_display
         esp_event
         nvs_flash
 )

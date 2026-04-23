@@ -11,10 +11,16 @@
 #include "ld6002c.h"
 #include "led_indicator.h"
 #include "nvs_flash.h"
+#include "oled_display.h"
 #include "wifi_manager.h"
 
 #define FALLGUARD_BUTTON_GPIO GPIO_NUM_0
 #define FALLGUARD_LED_GPIO    GPIO_NUM_2
+#define FALLGUARD_OLED_SDA_GPIO GPIO_NUM_8
+#define FALLGUARD_OLED_SCL_GPIO GPIO_NUM_9
+#define FALLGUARD_OLED_I2C_ADDR 0x3C
+#define FALLGUARD_OLED_WIDTH    128
+#define FALLGUARD_OLED_HEIGHT   64
 #define BUTTON_EVENT_QUEUE_LEN 8
 
 static const char *TAG = "fallguard";
@@ -126,6 +132,7 @@ static void app_factory_reset(void)
     ESP_LOGW(TAG, "Factory reset requested");
 
     ld6002c_deinit();
+    oled_display_deinit();
     wifi_manager_deinit();
     button_manager_deinit();
     led_indicator_deinit();
@@ -159,6 +166,7 @@ static void app_on_fall_status(const ld6002c_fall_status_t *status)
     }
 
     ESP_LOGI(TAG, "Radar fall status: is_fall=%s", status->is_fall ? "true" : "false");
+    ESP_ERROR_CHECK_WITHOUT_ABORT(oled_display_update_fall_status(status));
 }
 
 static void app_on_fw_status(const ld6002c_fw_status_t *status)
@@ -169,6 +177,7 @@ static void app_on_fw_status(const ld6002c_fw_status_t *status)
 
     ESP_LOGI(TAG, "Radar firmware: project=%d version=%u.%u.%u",
              (int)status->project, status->major, status->sub, status->modified);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(oled_display_update_fw_status(status));
 }
 
 static void app_on_params(const ld6002c_params_t *params)
@@ -187,6 +196,7 @@ static void app_on_params(const ld6002c_params_t *params)
              params->rect_XR,
              params->rect_ZF,
              params->rect_ZB);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(oled_display_update_params(params));
 }
 
 static void app_on_height_upload(const ld6002c_height_upload_t *result)
@@ -196,6 +206,7 @@ static void app_on_height_upload(const ld6002c_height_upload_t *result)
     }
 
     ESP_LOGI(TAG, "Radar height upload: value=%lu", (unsigned long)result->value);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(oled_display_update_height_upload(result));
 }
 
 static void app_on_3d_cloud(const ld6002c_3d_cloud_t *cloud)
@@ -210,6 +221,7 @@ static void app_on_3d_cloud(const ld6002c_3d_cloud_t *cloud)
         ESP_LOGI(TAG, "Radar cloud[0]: id=%ld x=%.2f y=%.2f z=%.2f speed=%.2f",
                  (long)point->cluster_index, point->x, point->y, point->z, point->speed);
     }
+    ESP_ERROR_CHECK_WITHOUT_ABORT(oled_display_update_3d_cloud(cloud));
 }
 
 static void app_on_human_status(const ld6002c_human_status_t *status)
@@ -219,6 +231,7 @@ static void app_on_human_status(const ld6002c_human_status_t *status)
     }
 
     ESP_LOGI(TAG, "Radar human status: is_human=%s", status->is_human ? "true" : "false");
+    ESP_ERROR_CHECK_WITHOUT_ABORT(oled_display_update_human_status(status));
 }
 
 static void app_init_radar(void)
@@ -246,11 +259,13 @@ static void app_init_radar(void)
         s_radar_initialized = false;
         s_led_error_latched = true;
         ESP_LOGE(TAG, "Radar init failed: %s", esp_err_to_name(err));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(oled_display_set_radar_ready(false));
         ESP_ERROR_CHECK_WITHOUT_ABORT(led_indicator_set_mode(LED_MODE_ERROR));
         return;
     }
 
     s_radar_initialized = true;
+    ESP_ERROR_CHECK_WITHOUT_ABORT(oled_display_set_radar_ready(true));
     ESP_LOGI(TAG, "Radar init complete");
 
     err = ld6002c_query_fw_status();
@@ -277,6 +292,7 @@ static void app_init_nvs(void)
 void app_main(void)
 {
     wifi_state_t last_wifi_state = WIFI_STATE_IDLE;
+    esp_err_t oled_err;
 
     app_init_nvs();
 
@@ -300,6 +316,20 @@ void app_main(void)
         .app_event_group = s_app_event_group,
     }));
     ESP_ERROR_CHECK(wifi_manager_start());
+
+    oled_err = oled_display_init(&(oled_display_config_t){
+        .i2c_port = I2C_NUM_0,
+        .sda_gpio_num = FALLGUARD_OLED_SDA_GPIO,
+        .scl_gpio_num = FALLGUARD_OLED_SCL_GPIO,
+        .i2c_addr = FALLGUARD_OLED_I2C_ADDR,
+        .width = FALLGUARD_OLED_WIDTH,
+        .height = FALLGUARD_OLED_HEIGHT,
+    });
+    if (oled_err != ESP_OK) {
+        ESP_LOGE(TAG, "OLED init failed: %s", esp_err_to_name(oled_err));
+    } else {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(oled_display_set_radar_ready(false));
+    }
 
     app_init_radar();
     ESP_LOGI(TAG, "FallGuard boot ready");
