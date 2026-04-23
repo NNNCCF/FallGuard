@@ -1,2 +1,13 @@
-idf_component_register(SRCS "hello_world_main.c"
-                    INCLUDE_DIRS "")
+idf_component_register(
+    SRCS
+        "main.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        button_manager
+        led_indicator
+        wifi_manager
+        ld6002c
+        esp_event
+        nvs_flash
+)

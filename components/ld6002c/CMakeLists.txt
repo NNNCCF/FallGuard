@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "ld6002c.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        driver
+        freertos
+        esp_common
+)
