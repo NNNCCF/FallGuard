@@ -53,6 +53,7 @@ esp_err_t wifi_manager_init(const wifi_manager_config_t *config);
 esp_err_t wifi_manager_deinit(void);
 esp_err_t wifi_manager_start(void);
 esp_err_t wifi_manager_clear_credentials(void);
+esp_err_t wifi_manager_get_radar_height_m(float *height_m);
 esp_err_t wifi_manager_get_status(wifi_status_t *status);
 const char *wifi_manager_state_to_string(wifi_state_t state);
 

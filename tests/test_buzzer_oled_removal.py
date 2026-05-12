@@ -84,6 +84,36 @@ class BuzzerOledRemovalTest(unittest.TestCase):
         self.assertIn("snprintf(height_text", app_radar_c)
         self.assertIn("app_log_periodic_radar_status();", app_radar_c)
 
+    def test_wifi_provisioning_page_is_chinese(self):
+        wifi_manager_c = read("components/wifi_manager/wifi_manager.c")
+
+        self.assertIn("<title>FallGuard 配网</title>", wifi_manager_c)
+        self.assertIn("<h1>FallGuard 配网</h1>", wifi_manager_c)
+        self.assertIn("连接设备到家庭 Wi-Fi", wifi_manager_c)
+        self.assertIn("Wi-Fi 名称", wifi_manager_c)
+        self.assertIn("Wi-Fi 密码", wifi_manager_c)
+        self.assertIn("开始连接", wifi_manager_c)
+        self.assertIn("附近的 Wi-Fi", wifi_manager_c)
+        self.assertIn("刷新列表", wifi_manager_c)
+        self.assertIn("正在扫描附近 Wi-Fi", wifi_manager_c)
+        self.assertNotIn("Wi-Fi Provisioning", wifi_manager_c)
+        self.assertNotIn("Nearby Wi-Fi", wifi_manager_c)
+        self.assertNotIn("Refresh list", wifi_manager_c)
+
+    def test_wifi_provisioning_saves_radar_install_height(self):
+        wifi_manager_h = read("components/wifi_manager/wifi_manager.h")
+        wifi_manager_c = read("components/wifi_manager/wifi_manager.c")
+        app_radar_c = read("main/app_radar.c")
+
+        self.assertIn("安装高度", wifi_manager_c)
+        self.assertIn("id='height_m'", wifi_manager_c)
+        self.assertIn("height_m:Number(heightEl.value)", wifi_manager_c)
+        self.assertIn("WIFI_KEY_RADAR_HEIGHT_CM", wifi_manager_c)
+        self.assertIn("nvs_set_u16(handle, WIFI_KEY_RADAR_HEIGHT_CM", wifi_manager_c)
+        self.assertIn("esp_err_t wifi_manager_get_radar_height_m(float *height_m)", wifi_manager_h)
+        self.assertIn("wifi_manager_get_radar_height_m(&s_configured_radar_height_m)", app_radar_c)
+        self.assertIn("ld6002c_set_height(s_configured_radar_height_m)", app_radar_c)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,6 +24,7 @@
 #define WIFI_NAMESPACE             "fallguard"
 #define WIFI_KEY_SSID              "wifi_ssid"
 #define WIFI_KEY_PASSWORD          "wifi_pass"
+#define WIFI_KEY_RADAR_HEIGHT_CM   "radar_h_cm"
 #define WIFI_AP_PASSWORD           "12345678"
 #define WIFI_AP_CHANNEL            6
 #define WIFI_AP_MAX_CONNECTIONS    1
@@ -31,6 +32,9 @@
 #define WIFI_STATUS_POLL_BODY_MAX  256
 #define WIFI_CONNECT_TIMEOUT_MS    10000
 #define WIFI_SCAN_RESULT_LIMIT     20
+#define WIFI_RADAR_HEIGHT_DEFAULT_M 2.7f
+#define WIFI_RADAR_HEIGHT_MIN_M     1.0f
+#define WIFI_RADAR_HEIGHT_MAX_M     5.0f
 
 #define WIFI_INTERNAL_EVENT_GOT_IP       BIT0
 #define WIFI_INTERNAL_EVENT_DISCONNECTED BIT1
@@ -65,7 +69,7 @@ static const char *TAG = "wifi_manager";
 static const char *s_provision_page =
     "<!doctype html><html><head><meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>FallGuard Setup</title>"
+    "<title>FallGuard 配网</title>"
     "<style>"
     "*{box-sizing:border-box}"
     ":root{color-scheme:light;font-family:'Segoe UI',sans-serif;"
@@ -103,16 +107,17 @@ static const char *s_provision_page =
     ".scan-meta{display:flex;justify-content:space-between;gap:12px;margin-top:6px;color:var(--muted);font-size:13px}"
     "@media (max-width:480px){.card{padding:22px}.scan-head{align-items:flex-start;flex-direction:column}.ghost-btn{width:100%}}"
     "</style></head><body><div class='card'><div class='pill'>FallGuard v1</div>"
-    "<h1>Wi-Fi Provisioning</h1><p>Connect your gateway to the local network."
-    " The page refreshes status automatically while the device is joining Wi-Fi.</p>"
-    "<form id='wifi-form'><label for='ssid'>SSID</label><input id='ssid' maxlength='32' required>"
-    "<label for='password'>Password</label><input id='password' type='password' maxlength='63'>"
-    "<button class='primary-btn' type='submit'>Connect</button></form>"
-    "<div class='status'><strong id='state'>Loading...</strong><span id='message'>Waiting for device status.</span>"
+    "<h1>FallGuard 配网</h1><p>连接设备到家庭 Wi-Fi。"
+    "设备连接期间，本页面会自动刷新状态。</p>"
+    "<form id='wifi-form'><label for='ssid'>Wi-Fi 名称</label><input id='ssid' maxlength='32' required>"
+    "<label for='password'>Wi-Fi 密码</label><input id='password' type='password' maxlength='63'>"
+    "<label for='height_m'>安装高度（米）</label><input id='height_m' type='number' min='1' max='5' step='0.1' value='2.7' required>"
+    "<button class='primary-btn' type='submit'>开始连接</button></form>"
+    "<div class='status'><strong id='state'>正在读取状态...</strong><span id='message'>等待设备状态。</span>"
     "<div id='ip' style='margin-top:8px;color:#5c6b8a'></div></div>"
-    "<div class='scan'><div class='scan-head'><strong>Nearby Wi-Fi</strong>"
-    "<button id='refresh-scan' class='ghost-btn' type='button'>Refresh list</button></div>"
-    "<div id='scan-message' class='scan-message'>Scanning nearby Wi-Fi...</div>"
+    "<div class='scan'><div class='scan-head'><strong>附近的 Wi-Fi</strong>"
+    "<button id='refresh-scan' class='ghost-btn' type='button'>刷新列表</button></div>"
+    "<div id='scan-message' class='scan-message'>正在扫描附近 Wi-Fi...</div>"
     "<div id='scan-list' class='scan-list'></div></div></div>"
     "<script>"
     "const stateEl=document.getElementById('state');"
@@ -120,6 +125,7 @@ static const char *s_provision_page =
     "const ipEl=document.getElementById('ip');"
     "const ssidEl=document.getElementById('ssid');"
     "const passwordEl=document.getElementById('password');"
+    "const heightEl=document.getElementById('height_m');"
     "const scanMessageEl=document.getElementById('scan-message');"
     "const scanListEl=document.getElementById('scan-list');"
     "const refreshScanButtonEl=document.getElementById('refresh-scan');"
@@ -127,53 +133,58 @@ static const char *s_provision_page =
     "async function readJson(response){try{return await response.json();}catch(err){return {};}}"
     "async function refresh(){"
     " try{const res=await fetch('/status');const data=await readJson(res);"
-    "  stateEl.textContent='State: '+data.state;"
-    "  messageEl.textContent=data.message||'No status message yet.';"
+    "  stateEl.textContent='状态：'+stateText(data.state);"
+    "  messageEl.textContent=data.message||'暂无状态消息。';"
     "  ipEl.textContent=data.ip?('IP: '+data.ip):'';"
-    " }catch(err){messageEl.textContent='Unable to read device status.';}"
+    " }catch(err){messageEl.textContent='无法读取设备状态。';}"
+    "}"
+    "function stateText(state){"
+    " const map={IDLE:'空闲',AP_MODE:'等待配网',STA_CONNECTING:'正在连接 Wi-Fi',STA_CONNECTED:'已连接 Wi-Fi',STA_DISCONNECTED:'Wi-Fi 已断开',STA_RECONNECTING:'正在重连 Wi-Fi',STA_FAILED:'连接失败'};"
+    " return map[state]||state||'未知';"
     "}"
     "function clearScanList(){scanListEl.innerHTML='';}"
     "function renderNetworks(networks){"
     " clearScanList();"
-    " if(!Array.isArray(networks)||!networks.length){scanMessageEl.textContent='No Wi-Fi networks found.';return;}"
-    " scanMessageEl.textContent='Tap a network name to fill the SSID field.';"
+    " if(!Array.isArray(networks)||!networks.length){scanMessageEl.textContent='未发现 Wi-Fi 网络。';return;}"
+    " scanMessageEl.textContent='点击网络名称自动填入 Wi-Fi 名称。';"
     " networks.forEach((network)=>{"
     "  if(!network||!network.ssid){return;}"
     "  const item=document.createElement('button');"
     "  item.type='button';item.className='scan-item';"
     "  const name=document.createElement('strong');name.textContent=network.ssid;"
     "  const meta=document.createElement('div');meta.className='scan-meta';"
-    "  const auth=document.createElement('span');auth.textContent=network.auth||'Unknown';"
+    "  const auth=document.createElement('span');auth.textContent=network.auth||'未知';"
     "  const rssi=document.createElement('span');"
     "  rssi.textContent=typeof network.rssi==='number'?(network.rssi+' dBm'):'';"
     "  meta.appendChild(auth);meta.appendChild(rssi);"
     "  item.appendChild(name);item.appendChild(meta);"
     "  item.addEventListener('click',()=>{ssidEl.value=network.ssid;passwordEl.focus();"
-    "   scanMessageEl.textContent='SSID filled. Enter the password and tap Connect.';});"
+    "   scanMessageEl.textContent='已填入 Wi-Fi 名称。请输入密码后点击开始连接。';});"
     "  scanListEl.appendChild(item);"
     " });"
-    " if(!scanListEl.children.length){scanMessageEl.textContent='No Wi-Fi networks found.';}"
+    " if(!scanListEl.children.length){scanMessageEl.textContent='未发现 Wi-Fi 网络。';}"
     "}"
     "async function refreshScan(){"
     " if(scanInProgress){return;}"
     " scanInProgress=true;refreshScanButtonEl.disabled=true;"
-    " scanMessageEl.textContent='Scanning nearby Wi-Fi...';clearScanList();"
+    " scanMessageEl.textContent='正在扫描附近 Wi-Fi...';clearScanList();"
     " try{const res=await fetch('/scan');const data=await readJson(res);"
-    "  if(!res.ok){scanMessageEl.textContent=data.message||'Unable to scan Wi-Fi right now.';return;}"
+    "  if(!res.ok){scanMessageEl.textContent=data.message||'暂时无法扫描 Wi-Fi。';return;}"
     "  renderNetworks(data.networks);"
-    " }catch(err){scanMessageEl.textContent='Unable to scan Wi-Fi right now. Try refreshing.';}"
+    " }catch(err){scanMessageEl.textContent='暂时无法扫描 Wi-Fi，请稍后重试。';}"
     " finally{scanInProgress=false;refreshScanButtonEl.disabled=false;}"
     "}"
     "document.getElementById('wifi-form').addEventListener('submit',async(event)=>{"
     " event.preventDefault();"
-    " const payload={ssid:ssidEl.value.trim(),password:passwordEl.value};"
-    " if(!payload.ssid){messageEl.textContent='SSID is required.';ssidEl.focus();return;}"
+    " const payload={ssid:ssidEl.value.trim(),password:passwordEl.value,height_m:Number(heightEl.value)};"
+    " if(!payload.ssid){messageEl.textContent='请输入 Wi-Fi 名称。';ssidEl.focus();return;}"
+    " if(!Number.isFinite(payload.height_m)||payload.height_m<1||payload.height_m>5){messageEl.textContent='安装高度请输入 1.0 到 5.0 米。';heightEl.focus();return;}"
     " try{const res=await fetch('/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});"
     "  const data=await readJson(res);"
-    "  if(!res.ok){messageEl.textContent=data.message||'Failed to apply Wi-Fi credentials.';return;}"
-    "  stateEl.textContent='State: '+(data.state||'STA_CONNECTING');"
-    "  messageEl.textContent=data.message||'Credentials received. Connecting...';"
-    " }catch(err){messageEl.textContent='Unable to send Wi-Fi credentials.';}"
+    "  if(!res.ok){messageEl.textContent=data.message||'配网信息保存失败。';return;}"
+    "  stateEl.textContent='状态：'+stateText(data.state||'STA_CONNECTING');"
+    "  messageEl.textContent=data.message||'已收到配网信息，正在连接...';"
+    " }catch(err){messageEl.textContent='无法发送配网信息。';}"
     "});"
     "refreshScanButtonEl.addEventListener('click',refreshScan);"
     "refresh();refreshScan();setInterval(refresh,2000);"
@@ -311,6 +322,60 @@ static esp_err_t wifi_manager_save_credentials(const char *ssid, const char *pas
     }
 
     return err;
+}
+
+static esp_err_t wifi_manager_save_radar_height_m(float height_m)
+{
+    if (height_m < WIFI_RADAR_HEIGHT_MIN_M || height_m > WIFI_RADAR_HEIGHT_MAX_M) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = wifi_manager_open_storage(&handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    uint16_t height_cm = (uint16_t)(height_m * 100.0f + 0.5f);
+    err = nvs_set_u16(handle, WIFI_KEY_RADAR_HEIGHT_CM, height_cm);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t wifi_manager_get_radar_height_m(float *height_m)
+{
+    if (height_m == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = wifi_manager_open_storage(&handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    uint16_t height_cm = 0;
+    err = nvs_get_u16(handle, WIFI_KEY_RADAR_HEIGHT_CM, &height_cm);
+    nvs_close(handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        *height_m = WIFI_RADAR_HEIGHT_DEFAULT_M;
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    float stored_height_m = (float)height_cm / 100.0f;
+    if (stored_height_m < WIFI_RADAR_HEIGHT_MIN_M || stored_height_m > WIFI_RADAR_HEIGHT_MAX_M) {
+        *height_m = WIFI_RADAR_HEIGHT_DEFAULT_M;
+        return ESP_OK;
+    }
+
+    *height_m = stored_height_m;
+    return ESP_OK;
 }
 
 static esp_err_t wifi_manager_load_credentials(char *ssid, size_t ssid_size,
@@ -648,7 +713,7 @@ static esp_err_t wifi_manager_handle_scan_get(httpd_req_t *req)
     if (err != ESP_OK || response_json == NULL) {
         ESP_LOGE(TAG, "Failed to scan nearby Wi-Fi: %s", esp_err_to_name(err));
         return wifi_manager_send_message_json(req, "500 Internal Server Error", false,
-                                              "Unable to scan nearby Wi-Fi.");
+                                              "暂时无法扫描 Wi-Fi。");
     }
 
     err = wifi_manager_send_json(req, "200 OK", response_json);
@@ -664,6 +729,7 @@ static esp_err_t wifi_manager_handle_connect_post(httpd_req_t *req)
     esp_err_t err = ESP_FAIL;
     const cJSON *ssid_json = NULL;
     const cJSON *password_json = NULL;
+    const cJSON *height_json = NULL;
 
     if (req->content_len <= 0 || req->content_len > WIFI_STATUS_POLL_BODY_MAX) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid payload length");
@@ -689,6 +755,7 @@ static esp_err_t wifi_manager_handle_connect_post(httpd_req_t *req)
 
     ssid_json = cJSON_GetObjectItemCaseSensitive(request_json, "ssid");
     password_json = cJSON_GetObjectItemCaseSensitive(request_json, "password");
+    height_json = cJSON_GetObjectItemCaseSensitive(request_json, "height_m");
     if (!cJSON_IsString(ssid_json) || ssid_json->valuestring == NULL || ssid_json->valuestring[0] == '\0') {
         cJSON_Delete(request_json);
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ssid is required");
@@ -709,8 +776,24 @@ static esp_err_t wifi_manager_handle_connect_post(httpd_req_t *req)
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "password too long");
     }
 
+    float radar_height_m = WIFI_RADAR_HEIGHT_DEFAULT_M;
+    if (height_json != NULL) {
+        if (!cJSON_IsNumber(height_json)) {
+            cJSON_Delete(request_json);
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "height_m must be a number");
+        }
+        radar_height_m = (float)height_json->valuedouble;
+    }
+    if (radar_height_m < WIFI_RADAR_HEIGHT_MIN_M || radar_height_m > WIFI_RADAR_HEIGHT_MAX_M) {
+        cJSON_Delete(request_json);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "height_m out of range");
+    }
+
     err = wifi_manager_save_credentials(ssid_json->valuestring,
                                         password_json != NULL ? password_json->valuestring : "");
+    if (err == ESP_OK) {
+        err = wifi_manager_save_radar_height_m(radar_height_m);
+    }
     if (err == ESP_OK) {
         err = wifi_manager_start();
     }
@@ -728,7 +811,7 @@ static esp_err_t wifi_manager_handle_connect_post(httpd_req_t *req)
 
     cJSON_AddBoolToObject(response_json, "ok", true);
     cJSON_AddStringToObject(response_json, "state", wifi_manager_state_to_string(WIFI_STATE_STA_CONNECTING));
-    cJSON_AddStringToObject(response_json, "message", "Credentials received. Connecting...");
+    cJSON_AddStringToObject(response_json, "message", "已收到配网信息，正在连接...");
 
     err = wifi_manager_send_json(req, "202 Accepted", response_json);
     cJSON_Delete(response_json);
@@ -922,8 +1005,8 @@ static esp_err_t wifi_manager_connect_with_retries(const char *ssid, const char 
             ESP_LOGE(TAG, "Failed to start STA attempt %u: %s",
                      (unsigned)(attempt + 1U), esp_err_to_name(err));
         } else {
-            wifi_manager_set_state(state, "%s", attempt == 0 ? "Connecting to Wi-Fi..."
-                                                             : "Retrying Wi-Fi connection...");
+            wifi_manager_set_state(state, "%s", attempt == 0 ? "正在连接 Wi-Fi..."
+                                                             : "正在重试 Wi-Fi 连接...");
             EventBits_t bits = xEventGroupWaitBits(
                 s_ctx.internal_event_group,
                 WIFI_INTERNAL_EVENT_GOT_IP | WIFI_INTERNAL_EVENT_DISCONNECTED | WIFI_INTERNAL_EVENT_CANCEL,
@@ -938,7 +1021,7 @@ static esp_err_t wifi_manager_connect_with_retries(const char *ssid, const char 
 
             if ((bits & WIFI_INTERNAL_EVENT_GOT_IP) != 0U) {
                 wifi_manager_update_rssi();
-                wifi_manager_set_state(WIFI_STATE_STA_CONNECTED, "Wi-Fi connected");
+                wifi_manager_set_state(WIFI_STATE_STA_CONNECTED, "Wi-Fi 已连接");
 
                 if (keep_ap || s_ctx.ap_active) {
                     wifi_manager_stop_http_server();
@@ -968,11 +1051,11 @@ static esp_err_t wifi_manager_connect_with_retries(const char *ssid, const char 
         }
     }
 
-    wifi_manager_set_state(WIFI_STATE_STA_FAILED, "Connection failed. Returning to AP mode.");
+    wifi_manager_set_state(WIFI_STATE_STA_FAILED, "连接失败，正在返回配网模式。");
     ESP_LOGW(TAG, "Wi-Fi retries exhausted, clearing credentials");
     ESP_ERROR_CHECK_WITHOUT_ABORT(wifi_manager_clear_credentials_internal());
 
-    return wifi_manager_enter_ap_mode("Connection failed. Please configure Wi-Fi again.");
+    return wifi_manager_enter_ap_mode("连接失败，请重新配置 Wi-Fi。");
 }
 
 static void wifi_manager_queue_reconnect(void)
@@ -1007,7 +1090,7 @@ static void wifi_manager_wifi_event_handler(void *arg, esp_event_base_t event_ba
         xSemaphoreGive(s_ctx.lock);
 
         if (current_state == WIFI_STATE_STA_CONNECTED) {
-            wifi_manager_set_state(WIFI_STATE_STA_DISCONNECTED, "Wi-Fi disconnected");
+            wifi_manager_set_state(WIFI_STATE_STA_DISCONNECTED, "Wi-Fi 已断开");
             wifi_manager_queue_reconnect();
         } else if (current_state == WIFI_STATE_STA_CONNECTING || current_state == WIFI_STATE_STA_RECONNECTING) {
             xEventGroupSetBits(s_ctx.internal_event_group, WIFI_INTERNAL_EVENT_DISCONNECTED);
@@ -1059,7 +1142,7 @@ static void wifi_manager_worker_task(void *arg)
             }
         } else if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NOT_FOUND) {
             wifi_manager_set_has_credentials(false);
-            err = wifi_manager_enter_ap_mode("Waiting for Wi-Fi credentials");
+            err = wifi_manager_enter_ap_mode("等待 Wi-Fi 配置信息");
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to start AP mode: %s", esp_err_to_name(err));
             }
@@ -1145,7 +1228,7 @@ esp_err_t wifi_manager_init(const wifi_manager_config_t *config)
 
     s_ctx.status.state = WIFI_STATE_IDLE;
     s_ctx.status.rssi = 0;
-    copy_string(s_ctx.status.message, sizeof(s_ctx.status.message), "Wi-Fi manager initialized");
+    copy_string(s_ctx.status.message, sizeof(s_ctx.status.message), "Wi-Fi 管理器已初始化");
     wifi_manager_publish_state(WIFI_STATE_IDLE);
     s_ctx.initialized = true;
 

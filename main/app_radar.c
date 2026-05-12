@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "ld6002c.h"
 #include "mqtt_reporter.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "app_radar";
 
@@ -50,6 +51,7 @@ static bool s_latest_is_fall;
 static bool s_latest_is_fall_valid;
 static float s_latest_target_height_m;
 static bool s_latest_target_height_valid;
+static float s_configured_radar_height_m;
 
 static const char *app_radar_project_to_string(ld6002c_project_t project)
 {
@@ -218,7 +220,7 @@ static void app_handle_radar_profile_result(radar_profile_step_t expected_step, 
         s_radar_profile_step = RADAR_PROFILE_STEP_DONE;
         ESP_LOGI(TAG,
                  "Radar profile applied: height=%.2f threshold=%.2f sensitivity=%lu zone=[%.2f %.2f %.2f %.2f]",
-                 FALLGUARD_RADAR_HEIGHT_M,
+                 s_configured_radar_height_m,
                  FALLGUARD_RADAR_THRESHOLD_M,
                  (unsigned long)FALLGUARD_RADAR_SENSITIVITY,
                  FALLGUARD_RADAR_ZONE_BOUNDARY_M,
@@ -335,7 +337,7 @@ static void app_on_human_status(const ld6002c_human_status_t *status)
     s_latest_is_human = status->is_human;
     s_latest_is_human_valid = true;
     mqtt_reporter_set_presence(status->is_human);
-    ESP_LOGI(TAG, "Radar human status: is_human=%s", status->is_human ? "true" : "false");
+    //ESP_LOGI(TAG, "Radar human status: is_human=%s", status->is_human ? "true" : "false");
 }
 
 static void app_maybe_enable_3d_cloud(void)
@@ -452,7 +454,7 @@ static void app_maybe_apply_radar_profile(void)
 
     switch (s_radar_profile_step) {
     case RADAR_PROFILE_STEP_HEIGHT:
-        err = ld6002c_set_height(FALLGUARD_RADAR_HEIGHT_M);
+        err = ld6002c_set_height(s_configured_radar_height_m);
         break;
     case RADAR_PROFILE_STEP_THRESHOLD:
         err = ld6002c_set_threshold(FALLGUARD_RADAR_THRESHOLD_M);
@@ -531,10 +533,12 @@ static void app_radar_reset_state(void)
     s_latest_is_fall_valid = false;
     s_latest_target_height_m = 0.0f;
     s_latest_target_height_valid = false;
+    s_configured_radar_height_m = FALLGUARD_RADAR_HEIGHT_M;
 }
 
 esp_err_t app_radar_init(void)
 {
+    esp_err_t err;
     ld6002c_config_t radar_config = {
         .uart_port = LD6002C_UART_PORT,
         .tx_pin = LD6002C_DEFAULT_TX_PIN,
@@ -556,7 +560,17 @@ esp_err_t app_radar_init(void)
 
     app_radar_reset_state();
 
-    esp_err_t err = ld6002c_init(&radar_config);
+    err = wifi_manager_get_radar_height_m(&s_configured_radar_height_m);
+    if (err != ESP_OK) {
+        s_configured_radar_height_m = FALLGUARD_RADAR_HEIGHT_M;
+        ESP_LOGW(TAG, "Using default radar install height %.2f m: %s",
+                 (double)s_configured_radar_height_m,
+                 esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "Using radar install height %.2f m", (double)s_configured_radar_height_m);
+    }
+
+    err = ld6002c_init(&radar_config);
     if (err != ESP_OK) {
         s_radar_initialized = false;
         ESP_LOGE(TAG, "Radar init failed: %s", esp_err_to_name(err));
