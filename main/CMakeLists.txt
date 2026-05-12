@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.c"
+        "app_radar.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -10,6 +11,7 @@ idf_component_register(
         ld6002c
         buzzer_alarm
         mqtt_reporter
+        esp_driver_gpio
         esp_event
         nvs_flash
 )

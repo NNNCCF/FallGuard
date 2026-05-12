@@ -12,11 +12,13 @@ def read(path: str) -> str:
 class BuzzerOledRemovalTest(unittest.TestCase):
     def test_main_uses_buzzer_alarm_on_gpio39_for_fall_status(self):
         main_c = read("main/main.c")
+        app_config_h = read("main/app_config.h")
+        app_radar_c = read("main/app_radar.c")
 
         self.assertIn('#include "buzzer_alarm.h"', main_c)
-        self.assertIn("#define FALLGUARD_BUZZER_GPIO GPIO_NUM_39", main_c)
+        self.assertIn("#define FALLGUARD_BUZZER_GPIO GPIO_NUM_39", app_config_h)
         self.assertIn(".gpio_num = FALLGUARD_BUZZER_GPIO", main_c)
-        self.assertIn("buzzer_alarm_set_active(status->is_fall)", main_c)
+        self.assertIn("buzzer_alarm_set_active(status->is_fall)", app_radar_c)
         self.assertIn("buzzer_alarm_deinit();", main_c)
 
     def test_oled_display_is_not_referenced_by_main_or_component_dependencies(self):
@@ -65,9 +67,22 @@ class BuzzerOledRemovalTest(unittest.TestCase):
         init_call = "buzzer_alarm_init(&(buzzer_alarm_config_t)"
         beep_call = "buzzer_alarm_beep_once(FALLGUARD_BOOT_BEEP_MS)"
 
-        self.assertIn("#define FALLGUARD_BOOT_BEEP_MS 35", main_c)
+        self.assertIn("#define FALLGUARD_BOOT_BEEP_MS 35", read("main/app_config.h"))
         self.assertIn(beep_call, main_c)
         self.assertLess(main_c.index(init_call), main_c.index(beep_call))
+
+    def test_radar_logs_presence_and_fall_status_once_per_second(self):
+        app_radar_c = read("main/app_radar.c")
+
+        self.assertIn("#define FALLGUARD_RADAR_STATUS_LOG_INTERVAL_MS 1000", app_radar_c)
+        self.assertIn("app_log_periodic_radar_status", app_radar_c)
+        self.assertIn("是否有人: %s 是否跌倒: %s", app_radar_c)
+        self.assertIn("s_latest_is_human", app_radar_c)
+        self.assertIn("s_latest_is_fall", app_radar_c)
+        self.assertIn("s_latest_target_height_m", app_radar_c)
+        self.assertIn("s_latest_target_height_valid", app_radar_c)
+        self.assertIn("snprintf(height_text", app_radar_c)
+        self.assertIn("app_log_periodic_radar_status();", app_radar_c)
 
 
 if __name__ == "__main__":
