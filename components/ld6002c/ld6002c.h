@@ -43,7 +43,7 @@ extern "C" {
 #define LD6002C_BAUD_RATE        (115200)
 
 /** UART RX 环形缓冲大小 */
-#define LD6002C_UART_BUF_SIZE    (1024)
+#define LD6002C_UART_BUF_SIZE    (4096)
 
 /** 接收任务栈大小 */
 #define LD6002C_TASK_STACK_SIZE  (4096)
@@ -56,12 +56,15 @@ extern "C" {
 
 /** 最大 DATA 区长度（协议最大帧 1024 字节，头 8 字节，尾 1 字节） */
 #define LD6002C_MAX_DATA_LEN     (1015)
+/** User log 文本最大缓存长度（超出时截断） */
+#define LD6002C_USER_LOG_TEXT_MAX_LEN (31U)
 
 /* ============================================================
  * 消息类型定义（TYPE 字段，大端序存储，但比较时用 uint16_t）
  * ============================================================ */
 typedef enum {
     /* 通用 */
+    MSG_TYPE_USER_LOG_TEXT      = 0x0100,  /*!< User log 文本帧（如 NO_FALL / SOME_HUMAN） */
     MSG_TYPE_QUERY_FW_STATUS    = 0xFFFF,  /*!< 查询固件状态 (主动下发) */
     MSG_TYPE_REPORT_FW_STATUS   = 0xFFFF,  /*!< 返回固件状态 (被动上传) */
     MSG_TYPE_ENTER_OTA          = 0x3000,  /*!< 进入 OTA 升级 (主动下发) */
@@ -131,8 +134,16 @@ typedef struct {
  * @brief 高度上传结果
  */
 typedef struct {
-    uint32_t value; /*!< 当前目标点高度（雷达坐标系，0 = 雷达位置） */
+    float value; /*!< 当前目标点高度，单位米（雷达坐标系，0 = 雷达位置） */
 } ld6002c_height_upload_t;
+
+/**
+ * @brief User log 文本
+ */
+typedef struct {
+    uint16_t len;                                     /*!< 原始文本长度 */
+    char text[LD6002C_USER_LOG_TEXT_MAX_LEN + 1U];    /*!< ASCII 文本，超出时截断并补 '\0' */
+} ld6002c_user_log_t;
 
 /**
  * @brief 3D 点云单点数据
@@ -183,6 +194,9 @@ typedef void (*ld6002c_params_cb_t)(const ld6002c_params_t *params);
 /** 高度上传回调 */
 typedef void (*ld6002c_height_cb_t)(const ld6002c_height_upload_t *result);
 
+/** User log 回调 */
+typedef void (*ld6002c_user_log_cb_t)(const ld6002c_user_log_t *user_log);
+
 /** 3D 点云回调 */
 typedef void (*ld6002c_3d_cloud_cb_t)(const ld6002c_3d_cloud_t *cloud);
 
@@ -204,6 +218,7 @@ typedef struct {
     ld6002c_result_cb_t   on_set_sensitivity;/*!< 设置灵敏度结果 */
     ld6002c_result_cb_t   on_set_alarm_zone; /*!< 设置报警区域结果 */
     ld6002c_height_cb_t   on_height_upload;  /*!< 高度上传结果 */
+    ld6002c_user_log_cb_t on_user_log;       /*!< User log 文本 */
     ld6002c_3d_cloud_cb_t on_3d_cloud;       /*!< 3D 点云数据 */
     ld6002c_human_cb_t    on_human_status;   /*!< 有无人状态 */
 } ld6002c_callbacks_t;

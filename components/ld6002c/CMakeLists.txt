@@ -4,7 +4,7 @@ idf_component_register(
     INCLUDE_DIRS
         "."
     REQUIRES
-        driver
+        esp_driver_uart
         freertos
         esp_common
 )

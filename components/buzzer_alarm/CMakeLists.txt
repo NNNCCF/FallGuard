@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "buzzer_alarm.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        esp_driver_gpio
+        freertos
+)

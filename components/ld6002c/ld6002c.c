@@ -14,6 +14,8 @@
 #include "ld6002c.h"
 
 #include <inttypes.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include "esp_log.h"
@@ -75,6 +77,20 @@ typedef struct {
 
 static ld6002c_ctx_t s_ctx = {0};
 
+typedef enum {
+    LD6002C_WARN_LEN_TOO_LARGE = 0,
+    LD6002C_WARN_HEAD_CKSUM,
+    LD6002C_WARN_DATA_CKSUM,
+    LD6002C_WARN_COUNT,
+} ld6002c_warn_type_t;
+
+typedef struct {
+    TickType_t last_log_tick;
+    uint32_t suppressed_count;
+} ld6002c_warn_state_t;
+
+static ld6002c_warn_state_t s_warn_state[LD6002C_WARN_COUNT] = {0};
+
 /* ============================================================
  * 内部工具函数
  * ============================================================ */
@@ -89,6 +105,32 @@ static uint8_t calc_cksum(const uint8_t *data, uint16_t len)
         ret ^= data[i];
     }
     return ~ret;
+}
+
+static void ld6002c_log_warn_rate_limited(ld6002c_warn_type_t type, const char *fmt, ...)
+{
+    const TickType_t now = xTaskGetTickCount();
+    ld6002c_warn_state_t *state = &s_warn_state[type];
+    char message[128];
+    va_list args;
+
+    va_start(args, fmt);
+    vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+
+    if (state->last_log_tick == 0 ||
+        (now - state->last_log_tick) >= pdMS_TO_TICKS(1000)) {
+        if (state->suppressed_count > 0) {
+            ESP_LOGW(TAG, "%s (suppressed %lu similar warnings)",
+                     message, (unsigned long)state->suppressed_count);
+            state->suppressed_count = 0;
+        } else {
+            ESP_LOGW(TAG, "%s", message);
+        }
+        state->last_log_tick = now;
+    } else {
+        state->suppressed_count++;
+    }
 }
 
 /**
@@ -120,6 +162,29 @@ static uint32_t read_u32_le(const uint8_t *p)
 static int32_t read_i32_le(const uint8_t *p)
 {
     return (int32_t)read_u32_le(p);
+}
+
+static void copy_ascii_text(char *dst, size_t dst_size, const uint8_t *src, uint16_t src_len)
+{
+    size_t copy_len = 0;
+
+    if (dst == NULL || dst_size == 0) {
+        return;
+    }
+
+    if (src != NULL && src_len > 0) {
+        copy_len = src_len;
+        if (copy_len > (dst_size - 1U)) {
+            copy_len = dst_size - 1U;
+        }
+
+        for (size_t i = 0; i < copy_len; ++i) {
+            uint8_t byte = src[i];
+            dst[i] = (byte >= 0x20U && byte <= 0x7EU) ? (char)byte : '.';
+        }
+    }
+
+    dst[copy_len] = '\0';
 }
 
 /**
@@ -220,6 +285,20 @@ static void tf_dispatch(const tf_frame_t *frame)
 
     switch (frame->type) {
 
+    /* ---------- 0x0100 User log 文本 ---------- */
+    case MSG_TYPE_USER_LOG_TEXT: {
+        ld6002c_user_log_t user_log = {
+            .len = frame->len,
+        };
+
+        copy_ascii_text(user_log.text, sizeof(user_log.text), frame->data, frame->len);
+        ESP_LOGD(TAG, "User log text: %s", user_log.text[0] != '\0' ? user_log.text : "<empty>");
+        if (s_ctx.cb.on_user_log) {
+            s_ctx.cb.on_user_log(&user_log);
+        }
+        break;
+    }
+
     /* ---------- 0xFFFF 固件状态 ---------- */
     case MSG_TYPE_QUERY_FW_STATUS: {
         if (frame->len < 4) {
@@ -317,7 +396,7 @@ static void tf_dispatch(const tf_frame_t *frame)
         if (frame->len < 4) break;
         if (s_ctx.cb.on_height_upload) {
             ld6002c_height_upload_t h = {
-                .value = read_u32_le(frame->data),
+                .value = read_float_le(frame->data),
             };
             s_ctx.cb.on_height_upload(&h);
         }
@@ -400,17 +479,22 @@ static void ld6002c_rx_task(void *arg)
     /* 已接收 DATA 字节数 */
     uint16_t data_received = 0;
 
-    uint8_t byte;
+    uint8_t rx_buf[64];
+
+    (void)arg;
 
     while (1) {
-        int ret = uart_read_bytes(s_ctx.uart_port, &byte, 1,
+        int ret = uart_read_bytes(s_ctx.uart_port, rx_buf, sizeof(rx_buf),
                                   pdMS_TO_TICKS(50));
         if (ret <= 0) {
             /* 超时，无数据，继续等待 */
             continue;
         }
 
-        switch (state) {
+        for (int idx = 0; idx < ret; ++idx) {
+            uint8_t byte = rx_buf[idx];
+
+            switch (state) {
 
         case PARSE_SOF:
             if (byte == LD6002C_SOF) {
@@ -445,7 +529,10 @@ static void ld6002c_rx_task(void *arg)
             frame.len |= byte;
             head_xor ^= byte;
             if (frame.len > LD6002C_MAX_DATA_LEN) {
-                ESP_LOGW(TAG, "LEN too large (%d), reset parser", frame.len);
+                ld6002c_log_warn_rate_limited(
+                    LD6002C_WARN_LEN_TOO_LARGE,
+                    "LEN too large (%u), reset parser",
+                    (unsigned int)frame.len);
                 state = PARSE_SOF;
                 break;
             }
@@ -466,9 +553,11 @@ static void ld6002c_rx_task(void *arg)
 
         case PARSE_HEAD_CKSUM: {
             /* 计算期望值：~head_xor */
-            uint8_t expected = ~head_xor;
+            uint8_t expected = (uint8_t)~head_xor;
             if (byte != expected) {
-                ESP_LOGW(TAG, "HEAD_CKSUM mismatch: got=0x%02X expect=0x%02X", byte, expected);
+                ld6002c_log_warn_rate_limited(
+                    LD6002C_WARN_HEAD_CKSUM,
+                    "HEAD_CKSUM mismatch: got=0x%02X expect=0x%02X", byte, expected);
                 state = PARSE_SOF;
                 break;
             }
@@ -493,9 +582,11 @@ static void ld6002c_rx_task(void *arg)
             break;
 
         case PARSE_DATA_CKSUM: {
-            uint8_t expected = ~data_xor;
+            uint8_t expected = (uint8_t)~data_xor;
             if (byte != expected) {
-                ESP_LOGW(TAG, "DATA_CKSUM mismatch: got=0x%02X expect=0x%02X", byte, expected);
+                ld6002c_log_warn_rate_limited(
+                    LD6002C_WARN_DATA_CKSUM,
+                    "DATA_CKSUM mismatch: got=0x%02X expect=0x%02X", byte, expected);
                 state = PARSE_SOF;
                 break;
             }
@@ -508,6 +599,7 @@ static void ld6002c_rx_task(void *arg)
         default:
             state = PARSE_SOF;
             break;
+            }
         }
     }
 }

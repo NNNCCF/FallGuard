@@ -30,6 +30,7 @@
 #define WIFI_COMMAND_QUEUE_LENGTH  4
 #define WIFI_STATUS_POLL_BODY_MAX  256
 #define WIFI_CONNECT_TIMEOUT_MS    10000
+#define WIFI_SCAN_RESULT_LIMIT     20
 
 #define WIFI_INTERNAL_EVENT_GOT_IP       BIT0
 #define WIFI_INTERNAL_EVENT_DISCONNECTED BIT1
@@ -66,56 +67,116 @@ static const char *s_provision_page =
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<title>FallGuard Setup</title>"
     "<style>"
+    "*{box-sizing:border-box}"
     ":root{color-scheme:light;font-family:'Segoe UI',sans-serif;"
     "--bg:#eef3ff;--panel:#ffffff;--ink:#14213d;--muted:#5c6b8a;"
     "--accent:#ff6b35;--accent2:#2ec4b6;}"
     "body{margin:0;min-height:100vh;display:grid;place-items:center;"
     "background:radial-gradient(circle at top,#fff8e8 0,#eef3ff 48%,#dfe8ff 100%);"
     "color:var(--ink)}"
-    ".card{width:min(92vw,440px);background:rgba(255,255,255,.92);backdrop-filter:blur(10px);"
+    ".card{width:min(92vw,460px);background:rgba(255,255,255,.92);backdrop-filter:blur(10px);"
     "border-radius:24px;padding:28px;box-shadow:0 18px 50px rgba(20,33,61,.18)}"
     "h1{margin:0 0 10px;font-size:28px;letter-spacing:.02em}"
     "p{margin:0 0 18px;color:var(--muted);line-height:1.5}"
     "label{display:block;margin:14px 0 8px;font-weight:600}"
     "input{width:100%;box-sizing:border-box;border:1px solid #ccd6f6;border-radius:14px;"
     "padding:14px 16px;font-size:16px;background:#f9fbff}"
-    "button{margin-top:18px;width:100%;border:0;border-radius:999px;padding:14px 18px;"
+    "button{font:inherit}"
+    ".primary-btn{margin-top:18px;width:100%;border:0;border-radius:999px;padding:14px 18px;"
     "font-size:16px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),#ff8c5a);"
     "box-shadow:0 12px 30px rgba(255,107,53,.25)}"
     ".status{margin-top:20px;padding:16px;border-radius:16px;background:#f4f7ff;border:1px solid #dce5ff}"
     ".status strong{display:block;margin-bottom:6px}"
     ".pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#e6fff8;color:#0d7368;"
     "font-size:13px;font-weight:700;margin-bottom:10px}"
+    ".scan{margin-top:18px;padding:16px;border-radius:16px;background:#fffaf2;border:1px solid #ffe3c9}"
+    ".scan-head{display:flex;align-items:center;justify-content:space-between;gap:12px}"
+    ".scan-head strong{font-size:16px}"
+    ".ghost-btn{border:1px solid #ffd0ad;border-radius:999px;padding:10px 14px;background:#fff;color:var(--ink);"
+    "font-size:14px;font-weight:600}"
+    ".ghost-btn:disabled,.scan-item:disabled{opacity:.6}"
+    ".scan-message{margin-top:12px;color:var(--muted);font-size:14px;line-height:1.5}"
+    ".scan-list{display:grid;gap:10px;margin-top:12px;max-height:220px;overflow:auto}"
+    ".scan-item{width:100%;border:1px solid #ffd7bb;border-radius:14px;padding:12px 14px;background:#fff;"
+    "text-align:left;color:var(--ink)}"
+    ".scan-item strong{display:block;font-size:15px}"
+    ".scan-meta{display:flex;justify-content:space-between;gap:12px;margin-top:6px;color:var(--muted);font-size:13px}"
+    "@media (max-width:480px){.card{padding:22px}.scan-head{align-items:flex-start;flex-direction:column}.ghost-btn{width:100%}}"
     "</style></head><body><div class='card'><div class='pill'>FallGuard v1</div>"
     "<h1>Wi-Fi Provisioning</h1><p>Connect your gateway to the local network."
     " The page refreshes status automatically while the device is joining Wi-Fi.</p>"
     "<form id='wifi-form'><label for='ssid'>SSID</label><input id='ssid' maxlength='32' required>"
     "<label for='password'>Password</label><input id='password' type='password' maxlength='63'>"
-    "<button type='submit'>Connect</button></form>"
+    "<button class='primary-btn' type='submit'>Connect</button></form>"
     "<div class='status'><strong id='state'>Loading...</strong><span id='message'>Waiting for device status.</span>"
-    "<div id='ip' style='margin-top:8px;color:#5c6b8a'></div></div></div>"
+    "<div id='ip' style='margin-top:8px;color:#5c6b8a'></div></div>"
+    "<div class='scan'><div class='scan-head'><strong>Nearby Wi-Fi</strong>"
+    "<button id='refresh-scan' class='ghost-btn' type='button'>Refresh list</button></div>"
+    "<div id='scan-message' class='scan-message'>Scanning nearby Wi-Fi...</div>"
+    "<div id='scan-list' class='scan-list'></div></div></div>"
     "<script>"
     "const stateEl=document.getElementById('state');"
     "const messageEl=document.getElementById('message');"
     "const ipEl=document.getElementById('ip');"
+    "const ssidEl=document.getElementById('ssid');"
+    "const passwordEl=document.getElementById('password');"
+    "const scanMessageEl=document.getElementById('scan-message');"
+    "const scanListEl=document.getElementById('scan-list');"
+    "const refreshScanButtonEl=document.getElementById('refresh-scan');"
+    "let scanInProgress=false;"
+    "async function readJson(response){try{return await response.json();}catch(err){return {};}}"
     "async function refresh(){"
-    " try{const res=await fetch('/status');const data=await res.json();"
+    " try{const res=await fetch('/status');const data=await readJson(res);"
     "  stateEl.textContent='State: '+data.state;"
     "  messageEl.textContent=data.message||'No status message yet.';"
     "  ipEl.textContent=data.ip?('IP: '+data.ip):'';"
     " }catch(err){messageEl.textContent='Unable to read device status.';}"
     "}"
+    "function clearScanList(){scanListEl.innerHTML='';}"
+    "function renderNetworks(networks){"
+    " clearScanList();"
+    " if(!Array.isArray(networks)||!networks.length){scanMessageEl.textContent='No Wi-Fi networks found.';return;}"
+    " scanMessageEl.textContent='Tap a network name to fill the SSID field.';"
+    " networks.forEach((network)=>{"
+    "  if(!network||!network.ssid){return;}"
+    "  const item=document.createElement('button');"
+    "  item.type='button';item.className='scan-item';"
+    "  const name=document.createElement('strong');name.textContent=network.ssid;"
+    "  const meta=document.createElement('div');meta.className='scan-meta';"
+    "  const auth=document.createElement('span');auth.textContent=network.auth||'Unknown';"
+    "  const rssi=document.createElement('span');"
+    "  rssi.textContent=typeof network.rssi==='number'?(network.rssi+' dBm'):'';"
+    "  meta.appendChild(auth);meta.appendChild(rssi);"
+    "  item.appendChild(name);item.appendChild(meta);"
+    "  item.addEventListener('click',()=>{ssidEl.value=network.ssid;passwordEl.focus();"
+    "   scanMessageEl.textContent='SSID filled. Enter the password and tap Connect.';});"
+    "  scanListEl.appendChild(item);"
+    " });"
+    " if(!scanListEl.children.length){scanMessageEl.textContent='No Wi-Fi networks found.';}"
+    "}"
+    "async function refreshScan(){"
+    " if(scanInProgress){return;}"
+    " scanInProgress=true;refreshScanButtonEl.disabled=true;"
+    " scanMessageEl.textContent='Scanning nearby Wi-Fi...';clearScanList();"
+    " try{const res=await fetch('/scan');const data=await readJson(res);"
+    "  if(!res.ok){scanMessageEl.textContent=data.message||'Unable to scan Wi-Fi right now.';return;}"
+    "  renderNetworks(data.networks);"
+    " }catch(err){scanMessageEl.textContent='Unable to scan Wi-Fi right now. Try refreshing.';}"
+    " finally{scanInProgress=false;refreshScanButtonEl.disabled=false;}"
+    "}"
     "document.getElementById('wifi-form').addEventListener('submit',async(event)=>{"
     " event.preventDefault();"
-    " const payload={ssid:document.getElementById('ssid').value.trim(),"
-    " password:document.getElementById('password').value};"
-    " if(!payload.ssid){messageEl.textContent='SSID is required.';return;}"
-    " const res=await fetch('/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});"
-    " const data=await res.json();"
-    " stateEl.textContent='State: '+(data.state||'STA_CONNECTING');"
-    " messageEl.textContent=data.message||'Credentials received. Connecting...';"
+    " const payload={ssid:ssidEl.value.trim(),password:passwordEl.value};"
+    " if(!payload.ssid){messageEl.textContent='SSID is required.';ssidEl.focus();return;}"
+    " try{const res=await fetch('/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});"
+    "  const data=await readJson(res);"
+    "  if(!res.ok){messageEl.textContent=data.message||'Failed to apply Wi-Fi credentials.';return;}"
+    "  stateEl.textContent='State: '+(data.state||'STA_CONNECTING');"
+    "  messageEl.textContent=data.message||'Credentials received. Connecting...';"
+    " }catch(err){messageEl.textContent='Unable to send Wi-Fi credentials.';}"
     "});"
-    "refresh();setInterval(refresh,2000);"
+    "refreshScanButtonEl.addEventListener('click',refreshScan);"
+    "refresh();refreshScan();setInterval(refresh,2000);"
     "</script></body></html>";
 
 static wifi_manager_ctx_t s_ctx = {0};
@@ -344,6 +405,38 @@ static void wifi_manager_update_rssi(void)
     xSemaphoreGive(s_ctx.lock);
 }
 
+static const char *wifi_manager_auth_mode_to_string(wifi_auth_mode_t auth_mode)
+{
+    switch (auth_mode) {
+    case WIFI_AUTH_OPEN:
+        return "Open";
+    case WIFI_AUTH_WEP:
+        return "WEP";
+    case WIFI_AUTH_WPA_PSK:
+        return "WPA-PSK";
+    case WIFI_AUTH_WPA2_PSK:
+        return "WPA2-PSK";
+    case WIFI_AUTH_WPA_WPA2_PSK:
+        return "WPA/WPA2-PSK";
+    case WIFI_AUTH_WPA2_ENTERPRISE:
+        return "WPA2-Enterprise";
+    case WIFI_AUTH_WPA3_PSK:
+        return "WPA3-PSK";
+    case WIFI_AUTH_WPA2_WPA3_PSK:
+        return "WPA2/WPA3-PSK";
+#ifdef WIFI_AUTH_WAPI_PSK
+    case WIFI_AUTH_WAPI_PSK:
+        return "WAPI-PSK";
+#endif
+#ifdef WIFI_AUTH_OWE
+    case WIFI_AUTH_OWE:
+        return "OWE";
+#endif
+    default:
+        return "Unknown";
+    }
+}
+
 static char *wifi_manager_status_json_string(cJSON **json_out)
 {
     wifi_status_t status;
@@ -396,6 +489,125 @@ static esp_err_t wifi_manager_send_json(httpd_req_t *req, const char *status_cod
     return err;
 }
 
+static esp_err_t wifi_manager_send_message_json(httpd_req_t *req, const char *status_code,
+                                                bool ok, const char *message)
+{
+    cJSON *json = cJSON_CreateObject();
+    esp_err_t err;
+
+    if (json == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+    }
+
+    cJSON_AddBoolToObject(json, "ok", ok);
+    cJSON_AddStringToObject(json, "message", message != NULL ? message : "");
+    err = wifi_manager_send_json(req, status_code, json);
+    cJSON_Delete(json);
+    return err;
+}
+
+static esp_err_t wifi_manager_scan_json(cJSON **json_out)
+{
+    wifi_status_t status;
+    wifi_scan_config_t scan_config = {0};
+    uint16_t available_count = 0;
+    uint16_t fetch_count = 0;
+    wifi_ap_record_t *records = NULL;
+    cJSON *response_json = NULL;
+    cJSON *networks_json = NULL;
+    esp_err_t err = ESP_FAIL;
+
+    if (json_out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *json_out = NULL;
+    err = wifi_manager_get_status(&status);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (status.state != WIFI_STATE_AP_MODE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    scan_config.show_hidden = false;
+    err = esp_wifi_scan_start(&scan_config, true);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = esp_wifi_scan_get_ap_num(&available_count);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    fetch_count = available_count;
+    if (fetch_count > WIFI_SCAN_RESULT_LIMIT) {
+        fetch_count = WIFI_SCAN_RESULT_LIMIT;
+    }
+
+    if (fetch_count > 0U) {
+        records = calloc(fetch_count, sizeof(wifi_ap_record_t));
+        if (records == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+
+        err = esp_wifi_scan_get_ap_records(&fetch_count, records);
+        if (err != ESP_OK) {
+            free(records);
+            return err;
+        }
+    }
+
+    response_json = cJSON_CreateObject();
+    if (response_json == NULL) {
+        free(records);
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON_AddBoolToObject(response_json, "ok", true);
+    networks_json = cJSON_AddArrayToObject(response_json, "networks");
+    if (networks_json == NULL) {
+        free(records);
+        cJSON_Delete(response_json);
+        return ESP_ERR_NO_MEM;
+    }
+
+    for (uint16_t i = 0; i < fetch_count; ++i) {
+        cJSON *network_json = NULL;
+
+        if (records[i].ssid[0] == '\0') {
+            continue;
+        }
+
+        network_json = cJSON_CreateObject();
+        if (network_json == NULL) {
+            err = ESP_ERR_NO_MEM;
+            goto cleanup;
+        }
+
+        if (cJSON_AddStringToObject(network_json, "ssid", (const char *)records[i].ssid) == NULL
+            || cJSON_AddNumberToObject(network_json, "rssi", records[i].rssi) == NULL
+            || cJSON_AddStringToObject(network_json, "auth",
+                                       wifi_manager_auth_mode_to_string(records[i].authmode)) == NULL
+            || !cJSON_AddItemToArray(networks_json, network_json)) {
+            cJSON_Delete(network_json);
+            err = ESP_ERR_NO_MEM;
+            goto cleanup;
+        }
+    }
+
+    *json_out = response_json;
+    response_json = NULL;
+    err = ESP_OK;
+
+cleanup:
+    free(records);
+    cJSON_Delete(response_json);
+    return err;
+}
+
 static esp_err_t wifi_manager_handle_root_get(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -420,6 +632,27 @@ static esp_err_t wifi_manager_handle_status_get(httpd_req_t *req)
 
     cJSON_free(payload);
     cJSON_Delete(json);
+    return err;
+}
+
+static esp_err_t wifi_manager_handle_scan_get(httpd_req_t *req)
+{
+    cJSON *response_json = NULL;
+    esp_err_t err = wifi_manager_scan_json(&response_json);
+
+    if (err == ESP_ERR_INVALID_STATE) {
+        return wifi_manager_send_message_json(req, "409 Conflict", false,
+                                              "Wi-Fi scan is only available before connecting.");
+    }
+
+    if (err != ESP_OK || response_json == NULL) {
+        ESP_LOGE(TAG, "Failed to scan nearby Wi-Fi: %s", esp_err_to_name(err));
+        return wifi_manager_send_message_json(req, "500 Internal Server Error", false,
+                                              "Unable to scan nearby Wi-Fi.");
+    }
+
+    err = wifi_manager_send_json(req, "200 OK", response_json);
+    cJSON_Delete(response_json);
     return err;
 }
 
@@ -522,6 +755,12 @@ static esp_err_t wifi_manager_start_http_server(void)
         .handler = wifi_manager_handle_status_get,
         .user_ctx = NULL,
     };
+    static const httpd_uri_t scan_uri = {
+        .uri = "/scan",
+        .method = HTTP_GET,
+        .handler = wifi_manager_handle_scan_get,
+        .user_ctx = NULL,
+    };
 
     if (s_ctx.http_server != NULL) {
         return ESP_OK;
@@ -543,6 +782,9 @@ static esp_err_t wifi_manager_start_http_server(void)
     }
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(s_ctx.http_server, &status_uri);
+    }
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_ctx.http_server, &scan_uri);
     }
     if (err != ESP_OK) {
         httpd_stop(s_ctx.http_server);
@@ -604,7 +846,7 @@ static esp_err_t wifi_manager_enter_ap_mode(const char *message)
 
     s_ctx.transitioning = true;
     (void)esp_wifi_disconnect();
-    err = esp_wifi_set_mode(WIFI_MODE_AP);
+    err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err == ESP_OK) {
         err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
     }

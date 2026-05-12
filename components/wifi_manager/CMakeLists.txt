@@ -9,6 +9,6 @@ idf_component_register(
         esp_netif
         esp_wifi
         freertos
-        json
+        cjson
         nvs_flash
 )
