@@ -16,6 +16,8 @@
 #include "nvs_flash.h"
 #include "wifi_manager.h"
 
+extern const uint8_t mqtt_broker_ca_pem_start[] asm("_binary_mqtt_broker_ca_pem_start");
+
 static const char *TAG = "fallguard";
 
 static EventGroupHandle_t s_app_event_group;
@@ -204,12 +206,13 @@ void app_main(void)
     app_init_radar();
 
     ESP_ERROR_CHECK(mqtt_reporter_init(&(mqtt_reporter_config_t){
-        .host        = MQTT_BROKER_HOST,
-        .port        = MQTT_BROKER_PORT,
-        .device_id   = MQTT_DEVICE_ID,
-        .username    = MQTT_USERNAME,
-        .password    = MQTT_PASSWORD,
-        .interval_ms = 1000,
+        .host            = MQTT_BROKER_HOST,
+        .port            = MQTT_BROKER_PORT,
+        .device_id       = MQTT_DEVICE_ID,
+        .username        = MQTT_USERNAME,
+        .password        = MQTT_PASSWORD,
+        .server_cert_pem = (const char *)mqtt_broker_ca_pem_start,
+        .interval_ms     = MQTT_PUBLISH_INTERVAL_MS,
     }));
 
     ESP_LOGI(TAG, "FallGuard boot ready");

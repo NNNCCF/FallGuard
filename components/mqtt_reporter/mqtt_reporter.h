@@ -5,12 +5,13 @@
 #include <stdint.h>
 
 typedef struct {
-    const char *host;        /* MQTT broker host */
-    uint16_t    port;        /* MQTT broker port, 0 = 1883 */
-    const char *device_id;   /* Device ID, also used as MQTT client ID */
-    const char *username;    /* MQTT username */
-    const char *password;    /* MQTT password */
-    uint32_t    interval_ms; /* Publish interval in ms, 0 = 1000 */
+    const char *host;               /* MQTT broker host */
+    uint16_t    port;               /* MQTT broker port, 0 = 8883 */
+    const char *device_id;          /* Device ID, also used as MQTT client ID */
+    const char *username;           /* MQTT username */
+    const char *password;           /* MQTT password fallback; prefer NVS */
+    const char *server_cert_pem;    /* Broker CA/server certificate in PEM format */
+    uint32_t    interval_ms;        /* Publish interval in ms, 0 = 1000 */
 } mqtt_reporter_config_t;
 
 esp_err_t mqtt_reporter_init(const mqtt_reporter_config_t *config);

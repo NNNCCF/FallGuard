@@ -8,4 +8,7 @@ idf_component_register(
         esp_event
         esp_system
         freertos
+        nvs_flash
+    EMBED_TXTFILES
+        "certs/mqtt_broker_ca.pem"
 )

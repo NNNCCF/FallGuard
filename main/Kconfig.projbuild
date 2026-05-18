@@ -1,0 +1,43 @@
+menu "FallGuard MQTT Security"
+
+config FALLGUARD_MQTT_BROKER_HOST
+    string "MQTT broker host"
+    default "mqtt.example.com"
+    help
+        MQTT broker hostname used by the FallGuard reporter.
+
+config FALLGUARD_MQTT_BROKER_PORT
+    int "MQTT broker TLS port"
+    default 8883
+    range 1 65535
+    help
+        TLS port for the MQTT broker. 8883 is the standard MQTT over TLS port.
+
+config FALLGUARD_MQTT_DEVICE_ID
+    string "MQTT device ID"
+    default "DEV-MINI-001"
+    help
+        Device ID published in the MQTT payload and used as MQTT client ID.
+
+config FALLGUARD_MQTT_USERNAME
+    string "MQTT username"
+    default "DEV-MINI-001"
+    help
+        MQTT username.
+
+config FALLGUARD_MQTT_PASSWORD
+    string "MQTT password"
+    default ""
+    help
+        Optional development-only fallback password.
+        Leave empty in production and inject the password into NVS during provisioning
+        or production test. The application will prefer the NVS value when present.
+
+config FALLGUARD_MQTT_PUBLISH_INTERVAL_MS
+    int "MQTT publish interval (ms)"
+    default 1000
+    range 100 60000
+    help
+        Publish interval for MQTT telemetry.
+
+endmenu
