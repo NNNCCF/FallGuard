@@ -18,23 +18,31 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lwip/def.h"
 #include "lwip/inet.h"
+#include "lwip/sockets.h"
 #include "nvs.h"
 
 #define WIFI_NAMESPACE             "fallguard"
 #define WIFI_KEY_SSID              "wifi_ssid"
 #define WIFI_KEY_PASSWORD          "wifi_pass"
 #define WIFI_KEY_RADAR_HEIGHT_CM   "radar_h_cm"
-#define WIFI_AP_PASSWORD           "12345678"
+#define WIFI_KEY_RADAR_HEIGHT_VERSION "radar_h_ver"
 #define WIFI_AP_CHANNEL            6
 #define WIFI_AP_MAX_CONNECTIONS    1
 #define WIFI_COMMAND_QUEUE_LENGTH  4
 #define WIFI_STATUS_POLL_BODY_MAX  256
 #define WIFI_CONNECT_TIMEOUT_MS    10000
 #define WIFI_SCAN_RESULT_LIMIT     20
-#define WIFI_RADAR_HEIGHT_DEFAULT_M 2.7f
+#define WIFI_DNS_PORT              53
+#define WIFI_DNS_BUFFER_SIZE       512
+#define WIFI_DNS_TASK_STACK_SIZE   3072
+#define WIFI_DNS_TASK_PRIORITY     5
+#define WIFI_AP_IP_ADDR            "192.168.4.1"
+#define WIFI_RADAR_HEIGHT_DEFAULT_M 2.4f
 #define WIFI_RADAR_HEIGHT_MIN_M     1.0f
 #define WIFI_RADAR_HEIGHT_MAX_M     5.0f
+#define WIFI_RADAR_HEIGHT_STORAGE_VERSION 1U
 
 #define WIFI_INTERNAL_EVENT_GOT_IP       BIT0
 #define WIFI_INTERNAL_EVENT_DISCONNECTED BIT1
@@ -56,7 +64,9 @@ typedef struct {
     QueueHandle_t command_queue;
     SemaphoreHandle_t lock;
     TaskHandle_t worker_task;
+    TaskHandle_t dns_task;
     httpd_handle_t http_server;
+    int dns_socket;
     esp_netif_t *sta_netif;
     esp_netif_t *ap_netif;
     esp_event_handler_instance_t wifi_event_instance;
@@ -111,7 +121,7 @@ static const char *s_provision_page =
     "设备连接期间，本页面会自动刷新状态。</p>"
     "<form id='wifi-form'><label for='ssid'>Wi-Fi 名称</label><input id='ssid' maxlength='32' required>"
     "<label for='password'>Wi-Fi 密码</label><input id='password' type='password' maxlength='63'>"
-    "<label for='height_m'>安装高度（米）</label><input id='height_m' type='number' min='1' max='5' step='0.1' value='2.7' required>"
+    "<label for='height_m'>安装高度（米）</label><input id='height_m' type='number' min='1' max='5' step='0.1' value='2.4' required>"
     "<button class='primary-btn' type='submit'>开始连接</button></form>"
     "<div class='status'><strong id='state'>正在读取状态...</strong><span id='message'>等待设备状态。</span>"
     "<div id='ip' style='margin-top:8px;color:#5c6b8a'></div></div>"
@@ -249,6 +259,78 @@ const char *wifi_manager_state_to_string(wifi_state_t state)
     }
 }
 
+static const char *wifi_manager_disconnect_reason_to_string(uint8_t reason)
+{
+    switch (reason) {
+    case WIFI_REASON_UNSPECIFIED:
+        return "UNSPECIFIED";
+    case WIFI_REASON_AUTH_EXPIRE:
+        return "AUTH_EXPIRE";
+    case WIFI_REASON_AUTH_LEAVE:
+        return "AUTH_LEAVE";
+    case WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY:
+        return "DISASSOC_DUE_TO_INACTIVITY";
+    case WIFI_REASON_ASSOC_TOOMANY:
+        return "ASSOC_TOOMANY";
+    case WIFI_REASON_CLASS2_FRAME_FROM_NONAUTH_STA:
+        return "CLASS2_FRAME_FROM_NONAUTH_STA";
+    case WIFI_REASON_CLASS3_FRAME_FROM_NONASSOC_STA:
+        return "CLASS3_FRAME_FROM_NONASSOC_STA";
+    case WIFI_REASON_ASSOC_LEAVE:
+        return "ASSOC_LEAVE";
+    case WIFI_REASON_ASSOC_NOT_AUTHED:
+        return "ASSOC_NOT_AUTHED";
+    case WIFI_REASON_DISASSOC_PWRCAP_BAD:
+        return "DISASSOC_PWRCAP_BAD";
+    case WIFI_REASON_DISASSOC_SUPCHAN_BAD:
+        return "DISASSOC_SUPCHAN_BAD";
+    case WIFI_REASON_BSS_TRANSITION_DISASSOC:
+        return "BSS_TRANSITION_DISASSOC";
+    case WIFI_REASON_IE_INVALID:
+        return "IE_INVALID";
+    case WIFI_REASON_MIC_FAILURE:
+        return "MIC_FAILURE";
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        return "4WAY_HANDSHAKE_TIMEOUT";
+    case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT:
+        return "GROUP_KEY_UPDATE_TIMEOUT";
+    case WIFI_REASON_IE_IN_4WAY_DIFFERS:
+        return "IE_IN_4WAY_DIFFERS";
+    case WIFI_REASON_GROUP_CIPHER_INVALID:
+        return "GROUP_CIPHER_INVALID";
+    case WIFI_REASON_PAIRWISE_CIPHER_INVALID:
+        return "PAIRWISE_CIPHER_INVALID";
+    case WIFI_REASON_AKMP_INVALID:
+        return "AKMP_INVALID";
+    case WIFI_REASON_UNSUPP_RSN_IE_VERSION:
+        return "UNSUPP_RSN_IE_VERSION";
+    case WIFI_REASON_INVALID_RSN_IE_CAP:
+        return "INVALID_RSN_IE_CAP";
+    case WIFI_REASON_802_1X_AUTH_FAILED:
+        return "802_1X_AUTH_FAILED";
+    case WIFI_REASON_CIPHER_SUITE_REJECTED:
+        return "CIPHER_SUITE_REJECTED";
+    case WIFI_REASON_BEACON_TIMEOUT:
+        return "BEACON_TIMEOUT";
+    case WIFI_REASON_NO_AP_FOUND:
+        return "NO_AP_FOUND";
+    case WIFI_REASON_AUTH_FAIL:
+        return "AUTH_FAIL";
+    case WIFI_REASON_ASSOC_FAIL:
+        return "ASSOC_FAIL";
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        return "HANDSHAKE_TIMEOUT";
+    case WIFI_REASON_CONNECTION_FAIL:
+        return "CONNECTION_FAIL";
+    case WIFI_REASON_AP_TSF_RESET:
+        return "AP_TSF_RESET";
+    case WIFI_REASON_ROAMING:
+        return "ROAMING";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 static void wifi_manager_publish_state(wifi_state_t state)
 {
     if (s_ctx.app_event_group == NULL) {
@@ -339,6 +421,10 @@ static esp_err_t wifi_manager_save_radar_height_m(float height_m)
     uint16_t height_cm = (uint16_t)(height_m * 100.0f + 0.5f);
     err = nvs_set_u16(handle, WIFI_KEY_RADAR_HEIGHT_CM, height_cm);
     if (err == ESP_OK) {
+        err = nvs_set_u8(handle, WIFI_KEY_RADAR_HEIGHT_VERSION,
+                         WIFI_RADAR_HEIGHT_STORAGE_VERSION);
+    }
+    if (err == ESP_OK) {
         err = nvs_commit(handle);
     }
     nvs_close(handle);
@@ -357,6 +443,8 @@ esp_err_t wifi_manager_get_radar_height_m(float *height_m)
         return err;
     }
 
+    uint8_t height_version = 0;
+    esp_err_t version_err = nvs_get_u8(handle, WIFI_KEY_RADAR_HEIGHT_VERSION, &height_version);
     uint16_t height_cm = 0;
     err = nvs_get_u16(handle, WIFI_KEY_RADAR_HEIGHT_CM, &height_cm);
     nvs_close(handle);
@@ -366,6 +454,24 @@ esp_err_t wifi_manager_get_radar_height_m(float *height_m)
     }
     if (err != ESP_OK) {
         return err;
+    }
+
+    if (version_err == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "Ignoring legacy radar height %u cm without version; using default %.2f m",
+                 (unsigned int)height_cm,
+                 (double)WIFI_RADAR_HEIGHT_DEFAULT_M);
+        *height_m = WIFI_RADAR_HEIGHT_DEFAULT_M;
+        return ESP_OK;
+    }
+    if (version_err != ESP_OK) {
+        return version_err;
+    }
+    if (height_version != WIFI_RADAR_HEIGHT_STORAGE_VERSION) {
+        ESP_LOGW(TAG, "Ignoring unsupported radar height storage version %u; using default %.2f m",
+                 (unsigned int)height_version,
+                 (double)WIFI_RADAR_HEIGHT_DEFAULT_M);
+        *height_m = WIFI_RADAR_HEIGHT_DEFAULT_M;
+        return ESP_OK;
     }
 
     float stored_height_m = (float)height_cm / 100.0f;
@@ -679,6 +785,13 @@ static esp_err_t wifi_manager_handle_root_get(httpd_req_t *req)
     return httpd_resp_send(req, s_provision_page, HTTPD_RESP_USE_STRLEN);
 }
 
+static esp_err_t wifi_manager_handle_captive_get(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "200 OK");
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, s_provision_page, HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t wifi_manager_handle_status_get(httpd_req_t *req)
 {
     cJSON *json = NULL;
@@ -844,6 +957,30 @@ static esp_err_t wifi_manager_start_http_server(void)
         .handler = wifi_manager_handle_scan_get,
         .user_ctx = NULL,
     };
+    static const httpd_uri_t android_uri = {
+        .uri = "/generate_204",
+        .method = HTTP_GET,
+        .handler = wifi_manager_handle_captive_get,
+        .user_ctx = NULL,
+    };
+    static const httpd_uri_t apple_uri = {
+        .uri = "/hotspot-detect.html",
+        .method = HTTP_GET,
+        .handler = wifi_manager_handle_captive_get,
+        .user_ctx = NULL,
+    };
+    static const httpd_uri_t windows_uri = {
+        .uri = "/connecttest.txt",
+        .method = HTTP_GET,
+        .handler = wifi_manager_handle_captive_get,
+        .user_ctx = NULL,
+    };
+    static const httpd_uri_t ncsi_uri = {
+        .uri = "/ncsi.txt",
+        .method = HTTP_GET,
+        .handler = wifi_manager_handle_captive_get,
+        .user_ctx = NULL,
+    };
 
     if (s_ctx.http_server != NULL) {
         return ESP_OK;
@@ -851,7 +988,7 @@ static esp_err_t wifi_manager_start_http_server(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 6;
+    config.max_uri_handlers = 10;
     config.lru_purge_enable = true;
 
     esp_err_t err = httpd_start(&s_ctx.http_server, &config);
@@ -869,6 +1006,18 @@ static esp_err_t wifi_manager_start_http_server(void)
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(s_ctx.http_server, &scan_uri);
     }
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_ctx.http_server, &android_uri);
+    }
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_ctx.http_server, &apple_uri);
+    }
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_ctx.http_server, &windows_uri);
+    }
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_ctx.http_server, &ncsi_uri);
+    }
     if (err != ESP_OK) {
         httpd_stop(s_ctx.http_server);
         s_ctx.http_server = NULL;
@@ -882,6 +1031,145 @@ static void wifi_manager_stop_http_server(void)
     if (s_ctx.http_server != NULL) {
         httpd_stop(s_ctx.http_server);
         s_ctx.http_server = NULL;
+    }
+}
+
+static int dns_skip_query_name(const uint8_t *packet, int packet_len, int offset)
+{
+    while (offset < packet_len && packet[offset] != 0U) {
+        uint8_t label_len = packet[offset++];
+        if ((label_len & 0xC0U) != 0U || offset + label_len > packet_len) {
+            return -1;
+        }
+        offset += label_len;
+    }
+
+    if (offset >= packet_len) {
+        return -1;
+    }
+
+    return offset + 1;
+}
+
+static int dns_build_captive_response(const uint8_t *query, int query_len,
+                                      uint8_t *response, size_t response_size)
+{
+    const int dns_header_len = 12;
+    if (query_len < dns_header_len || response_size < (size_t)(query_len + 16)) {
+        return -1;
+    }
+
+    int name_end = dns_skip_query_name(query, query_len, dns_header_len);
+    if (name_end < 0 || name_end + 4 > query_len) {
+        return -1;
+    }
+
+    memcpy(response, query, (size_t)query_len);
+    response[2] = 0x81U;
+    response[3] = 0x80U;
+    response[6] = 0x00U;
+    response[7] = 0x01U;
+    response[8] = 0x00U;
+    response[9] = 0x00U;
+    response[10] = 0x00U;
+    response[11] = 0x00U;
+
+    int offset = query_len;
+    response[offset++] = 0xC0U;
+    response[offset++] = 0x0CU;
+    response[offset++] = 0x00U;
+    response[offset++] = 0x01U;
+    response[offset++] = 0x00U;
+    response[offset++] = 0x01U;
+    response[offset++] = 0x00U;
+    response[offset++] = 0x00U;
+    response[offset++] = 0x00U;
+    response[offset++] = 0x3CU;
+    response[offset++] = 0x00U;
+    response[offset++] = 0x04U;
+
+    uint32_t ap_ip = ipaddr_addr(WIFI_AP_IP_ADDR);
+    memcpy(&response[offset], &ap_ip, sizeof(ap_ip));
+    offset += (int)sizeof(ap_ip);
+    return offset;
+}
+
+static void dns_server_task(void *arg)
+{
+    (void)arg;
+
+    while (true) {
+        uint8_t query[WIFI_DNS_BUFFER_SIZE];
+        uint8_t response[WIFI_DNS_BUFFER_SIZE];
+        struct sockaddr_in source_addr;
+        socklen_t source_len = sizeof(source_addr);
+
+        int len = recvfrom(s_ctx.dns_socket, query, sizeof(query), 0,
+                           (struct sockaddr *)&source_addr, &source_len);
+        if (len < 0) {
+            break;
+        }
+
+        int response_len = dns_build_captive_response(query, len, response, sizeof(response));
+        if (response_len > 0) {
+            (void)sendto(s_ctx.dns_socket, response, (size_t)response_len, 0,
+                         (struct sockaddr *)&source_addr, source_len);
+        }
+    }
+
+    s_ctx.dns_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static esp_err_t wifi_manager_start_dns_server(void)
+{
+    if (s_ctx.dns_task != NULL) {
+        return ESP_OK;
+    }
+
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) {
+        return ESP_FAIL;
+    }
+
+    int reuse = 1;
+    (void)setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    struct sockaddr_in listen_addr = {
+        .sin_family = AF_INET,
+        .sin_port = PP_HTONS(WIFI_DNS_PORT),
+        .sin_addr.s_addr = htonl(INADDR_ANY),
+    };
+
+    if (bind(sock, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0) {
+        close(sock);
+        return ESP_FAIL;
+    }
+
+    s_ctx.dns_socket = sock;
+    BaseType_t task_created = xTaskCreate(dns_server_task, "wifi_dns",
+                                          WIFI_DNS_TASK_STACK_SIZE, NULL,
+                                          WIFI_DNS_TASK_PRIORITY, &s_ctx.dns_task);
+    if (task_created != pdPASS) {
+        close(sock);
+        s_ctx.dns_socket = -1;
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
+
+static void wifi_manager_stop_dns_server(void)
+{
+    if (s_ctx.dns_socket >= 0) {
+        shutdown(s_ctx.dns_socket, 0);
+        close(s_ctx.dns_socket);
+        s_ctx.dns_socket = -1;
+    }
+
+    if (s_ctx.dns_task != NULL) {
+        vTaskDelete(s_ctx.dns_task);
+        s_ctx.dns_task = NULL;
     }
 }
 
@@ -920,10 +1208,9 @@ static esp_err_t wifi_manager_enter_ap_mode(const char *message)
     }
 
     copy_string((char *)ap_config.ap.ssid, sizeof(ap_config.ap.ssid), ap_ssid);
-    copy_string((char *)ap_config.ap.password, sizeof(ap_config.ap.password), WIFI_AP_PASSWORD);
     ap_config.ap.channel = WIFI_AP_CHANNEL;
     ap_config.ap.max_connection = WIFI_AP_MAX_CONNECTIONS;
-    ap_config.ap.authmode = WIFI_AUTH_WPA_WPA2_PSK;
+    ap_config.ap.authmode = WIFI_AUTH_OPEN;
     ap_config.ap.ssid_len = (uint8_t)strlen(ap_ssid);
     ap_config.ap.pmf_cfg.required = false;
 
@@ -943,6 +1230,11 @@ static esp_err_t wifi_manager_enter_ap_mode(const char *message)
 
     err = wifi_manager_start_http_server();
     if (err != ESP_OK) {
+        return err;
+    }
+    err = wifi_manager_start_dns_server();
+    if (err != ESP_OK) {
+        wifi_manager_stop_http_server();
         return err;
     }
 
@@ -994,7 +1286,8 @@ static esp_err_t wifi_manager_begin_sta_attempt(const char *ssid, const char *pa
     return err;
 }
 
-static esp_err_t wifi_manager_connect_with_retries(const char *ssid, const char *password, bool keep_ap)
+static esp_err_t wifi_manager_connect_with_retries(const char *ssid, const char *password,
+                                                   bool keep_ap, bool clear_credentials_on_failure)
 {
     static const uint32_t retry_backoff_ms[] = {5000, 10000, 20000};
 
@@ -1025,6 +1318,7 @@ static esp_err_t wifi_manager_connect_with_retries(const char *ssid, const char 
 
                 if (keep_ap || s_ctx.ap_active) {
                     wifi_manager_stop_http_server();
+                    wifi_manager_stop_dns_server();
                     s_ctx.transitioning = true;
                     err = esp_wifi_set_mode(WIFI_MODE_STA);
                     s_ctx.transitioning = false;
@@ -1051,11 +1345,17 @@ static esp_err_t wifi_manager_connect_with_retries(const char *ssid, const char 
         }
     }
 
-    wifi_manager_set_state(WIFI_STATE_STA_FAILED, "连接失败，正在返回配网模式。");
-    ESP_LOGW(TAG, "Wi-Fi retries exhausted, clearing credentials");
-    ESP_ERROR_CHECK_WITHOUT_ABORT(wifi_manager_clear_credentials_internal());
+    if (clear_credentials_on_failure) {
+        wifi_manager_set_state(WIFI_STATE_STA_FAILED, "连接失败，正在返回配网模式。");
+        ESP_LOGW(TAG, "Wi-Fi retries exhausted, clearing credentials");
+        ESP_ERROR_CHECK_WITHOUT_ABORT(wifi_manager_clear_credentials_internal());
 
-    return wifi_manager_enter_ap_mode("连接失败，请重新配置 Wi-Fi。");
+        return wifi_manager_enter_ap_mode("连接失败，请重新配置 Wi-Fi。");
+    }
+
+    wifi_manager_set_state(WIFI_STATE_STA_DISCONNECTED, "Wi-Fi 暂时断开，将继续重连。");
+    ESP_LOGW(TAG, "Wi-Fi reconnect attempts exhausted; keeping stored credentials");
+    return ESP_ERR_TIMEOUT;
 }
 
 static void wifi_manager_queue_reconnect(void)
@@ -1076,9 +1376,16 @@ static void wifi_manager_wifi_event_handler(void *arg, esp_event_base_t event_ba
 {
     (void)arg;
     (void)event_base;
-    (void)event_data;
 
     if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *event =
+            (const wifi_event_sta_disconnected_t *)event_data;
+        uint8_t reason = (event != NULL) ? event->reason : 0U;
+
+        ESP_LOGW(TAG, "STA disconnected: reason=%u (%s)",
+                 (unsigned)reason,
+                 wifi_manager_disconnect_reason_to_string(reason));
+
         wifi_manager_clear_ip_info();
         if (s_ctx.transitioning) {
             return;
@@ -1136,7 +1443,8 @@ static void wifi_manager_worker_task(void *arg)
         if (err == ESP_OK) {
             wifi_manager_set_has_credentials(true);
             ESP_LOGI(TAG, "Starting STA workflow using stored credentials");
-            err = wifi_manager_connect_with_retries(ssid, password, s_ctx.ap_active);
+            err = wifi_manager_connect_with_retries(ssid, password, s_ctx.ap_active,
+                                                    command == WIFI_CMD_START);
             if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
                 ESP_LOGW(TAG, "STA workflow ended with %s", esp_err_to_name(err));
             }
@@ -1165,6 +1473,7 @@ esp_err_t wifi_manager_init(const wifi_manager_config_t *config)
     }
 
     memset(&s_ctx, 0, sizeof(s_ctx));
+    s_ctx.dns_socket = -1;
     s_ctx.app_event_group = config->app_event_group;
     s_ctx.internal_event_group = xEventGroupCreate();
     s_ctx.command_queue = xQueueCreate(WIFI_COMMAND_QUEUE_LENGTH, sizeof(wifi_manager_cmd_t));
@@ -1289,6 +1598,7 @@ esp_err_t wifi_manager_deinit(void)
     }
 
     wifi_manager_stop_http_server();
+    wifi_manager_stop_dns_server();
 
     if (s_ctx.wifi_event_instance != NULL) {
         esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_ctx.wifi_event_instance);

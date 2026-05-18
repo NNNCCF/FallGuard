@@ -11,4 +11,6 @@ idf_component_register(
         freertos
         cjson
         nvs_flash
+    PRIV_REQUIRES
+        lwip
 )

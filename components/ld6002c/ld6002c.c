@@ -34,6 +34,8 @@ static const char *TAG = "LD6002C";
 #define TF_HEADER_LEN  (8U)
 /** DATA_CKSUM 字节数 */
 #define TF_TAIL_LEN    (1U)
+/** 客户端下发帧 ID 范围，上位机发送帧使用 0x8000 起始段 */
+#define LD6002C_CLIENT_TX_ID_BASE 0x8000U
 
 /* ============================================================
  * 内部状态机枚举
@@ -260,6 +262,17 @@ static esp_err_t tf_send(uint16_t type, const uint8_t *data, uint16_t len)
         offset += TF_TAIL_LEN;
     }
 
+    char hex[96];
+    size_t pos = 0;
+    for (uint16_t i = 0; i < frame_len && pos < sizeof(hex); ++i) {
+        int n = snprintf(&hex[pos], sizeof(hex) - pos, "%02X%s",
+                         buf[i], (i + 1U) < frame_len ? " " : "");
+        if (n <= 0) {
+            break;
+        }
+        pos += (size_t)n;
+    }
+
     int written = uart_write_bytes(s_ctx.uart_port, (const char *)buf, frame_len);
     xSemaphoreGive(s_ctx.tx_mutex);
 
@@ -268,7 +281,8 @@ static esp_err_t tf_send(uint16_t type, const uint8_t *data, uint16_t len)
         return ESP_FAIL;
     }
 
-    ESP_LOGD(TAG, "TX type=0x%04X id=%04X len=%d", type, id, len);
+    ESP_LOGI(TAG, "TX type=0x%04X id=0x%04X len=%u bytes=%s",
+             type, id, (unsigned int)len, hex);
     return ESP_OK;
 }
 
@@ -621,7 +635,7 @@ esp_err_t ld6002c_init(const ld6002c_config_t *cfg)
     /* 保存配置 */
     s_ctx.uart_port = cfg->uart_port;
     memcpy(&s_ctx.cb, &cfg->callbacks, sizeof(ld6002c_callbacks_t));
-    s_ctx.tx_id = 0;
+    s_ctx.tx_id = LD6002C_CLIENT_TX_ID_BASE;
 
     /* 互斥量 */
     s_ctx.tx_mutex = xSemaphoreCreateMutex();

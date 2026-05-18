@@ -110,9 +110,111 @@ class BuzzerOledRemovalTest(unittest.TestCase):
         self.assertIn("height_m:Number(heightEl.value)", wifi_manager_c)
         self.assertIn("WIFI_KEY_RADAR_HEIGHT_CM", wifi_manager_c)
         self.assertIn("nvs_set_u16(handle, WIFI_KEY_RADAR_HEIGHT_CM", wifi_manager_c)
+        self.assertIn("WIFI_KEY_RADAR_HEIGHT_VERSION", wifi_manager_c)
+        self.assertIn("nvs_set_u8(handle, WIFI_KEY_RADAR_HEIGHT_VERSION", wifi_manager_c)
         self.assertIn("esp_err_t wifi_manager_get_radar_height_m(float *height_m)", wifi_manager_h)
         self.assertIn("wifi_manager_get_radar_height_m(&s_configured_radar_height_m)", app_radar_c)
         self.assertIn("ld6002c_set_height(s_configured_radar_height_m)", app_radar_c)
+
+    def test_wifi_provisioning_ignores_legacy_saved_default_height(self):
+        wifi_manager_c = read("components/wifi_manager/wifi_manager.c")
+
+        self.assertIn("WIFI_RADAR_HEIGHT_STORAGE_VERSION", wifi_manager_c)
+        self.assertIn("nvs_get_u8(handle, WIFI_KEY_RADAR_HEIGHT_VERSION", wifi_manager_c)
+        self.assertIn("*height_m = WIFI_RADAR_HEIGHT_DEFAULT_M;", wifi_manager_c)
+        self.assertIn("legacy radar height", wifi_manager_c)
+
+    def test_radar_reloads_saved_install_height_after_provisioning(self):
+        app_radar_c = read("main/app_radar.c")
+
+        self.assertIn("app_maybe_reload_radar_height", app_radar_c)
+        self.assertIn("s_last_height_reload_tick", app_radar_c)
+        self.assertIn("RADAR_PROFILE_STEP_HEIGHT", app_radar_c)
+        self.assertIn("Radar install height changed", app_radar_c)
+        self.assertIn("app_maybe_reload_radar_height();", app_radar_c)
+
+    def test_radar_default_profile_matches_boot_requirements(self):
+        app_config_h = read("main/app_config.h")
+        wifi_manager_c = read("components/wifi_manager/wifi_manager.c")
+
+        self.assertIn("#define FALLGUARD_RADAR_HEIGHT_M 2.4f", app_config_h)
+        self.assertIn("#define FALLGUARD_RADAR_THRESHOLD_M 0.5f", app_config_h)
+        self.assertIn("#define FALLGUARD_RADAR_SENSITIVITY 20U", app_config_h)
+        self.assertIn("#define FALLGUARD_RADAR_ZONE_BOUNDARY_M 1.5f", app_config_h)
+        self.assertIn("#define WIFI_RADAR_HEIGHT_DEFAULT_M 2.4f", wifi_manager_c)
+        self.assertIn("value='2.4'", wifi_manager_c)
+
+    def test_radar_boot_profile_does_not_wait_for_stream_before_sending(self):
+        app_radar_c = read("main/app_radar.c")
+
+        self.assertIn("static void app_maybe_apply_radar_profile(void)", app_radar_c)
+        self.assertIn("!s_radar_initialized || s_radar_profile_command_in_flight", app_radar_c)
+        self.assertNotIn("!s_radar_initialized || !s_radar_stream_seen || s_radar_profile_command_in_flight", app_radar_c)
+
+    def test_radar_init_sends_height_profile_before_auxiliary_commands(self):
+        app_radar_c = read("main/app_radar.c")
+
+        self.assertIn("app_maybe_apply_radar_profile();", app_radar_c)
+        self.assertLess(app_radar_c.index("app_maybe_apply_radar_profile();"),
+                        app_radar_c.index("ld6002c_set_user_log(false)"))
+        self.assertLess(app_radar_c.index("app_maybe_apply_radar_profile();"),
+                        app_radar_c.index("ld6002c_query_fw_status()"))
+
+    def test_radar_profile_repeats_each_setting_like_vendor_tool(self):
+        app_radar_c = read("main/app_radar.c")
+
+        self.assertIn("#define FALLGUARD_RADAR_PROFILE_SEND_REPEATS 3", app_radar_c)
+        self.assertIn("app_send_radar_profile_step", app_radar_c)
+        self.assertIn("for (uint8_t attempt = 0; attempt < FALLGUARD_RADAR_PROFILE_SEND_REPEATS; ++attempt)", app_radar_c)
+        self.assertIn("Duplicate radar profile ack ignored", app_radar_c)
+
+    def test_radar_profile_does_not_block_later_settings_on_missing_ack(self):
+        app_radar_c = read("main/app_radar.c")
+
+        self.assertIn("static void app_send_full_radar_profile(void)", app_radar_c)
+        self.assertIn("RADAR_PROFILE_STEP_HEIGHT,", app_radar_c)
+        self.assertIn("RADAR_PROFILE_STEP_THRESHOLD,", app_radar_c)
+        self.assertIn("RADAR_PROFILE_STEP_SENSITIVITY,", app_radar_c)
+        self.assertIn("RADAR_PROFILE_STEP_ALARM_ZONE,", app_radar_c)
+        self.assertIn("s_radar_profile_step = RADAR_PROFILE_STEP_DONE;", app_radar_c)
+        self.assertIn("app_send_full_radar_profile();", app_radar_c)
+
+    def test_ld6002c_commands_use_client_frame_id_range(self):
+        ld6002c_c = read("components/ld6002c/ld6002c.c")
+
+        self.assertIn("#define LD6002C_CLIENT_TX_ID_BASE 0x8000U", ld6002c_c)
+        self.assertIn("s_ctx.tx_id = LD6002C_CLIENT_TX_ID_BASE;", ld6002c_c)
+
+    def test_wifi_provisioning_uses_open_ap_and_captive_portal(self):
+        wifi_manager_c = read("components/wifi_manager/wifi_manager.c")
+        wifi_cmake = read("components/wifi_manager/CMakeLists.txt")
+
+        self.assertIn("WIFI_AUTH_OPEN", wifi_manager_c)
+        self.assertIn("wifi_manager_start_dns_server", wifi_manager_c)
+        self.assertIn("wifi_manager_stop_dns_server", wifi_manager_c)
+        self.assertIn("dns_server_task", wifi_manager_c)
+        self.assertIn("lwip/sockets.h", wifi_manager_c)
+        self.assertIn("lwip/def.h", wifi_manager_c)
+        self.assertIn("/generate_204", wifi_manager_c)
+        self.assertIn("/hotspot-detect.html", wifi_manager_c)
+        self.assertIn("/connecttest.txt", wifi_manager_c)
+        self.assertIn("PRIV_REQUIRES", wifi_cmake)
+        self.assertIn("lwip", wifi_cmake)
+
+    def test_wifi_disconnect_logs_driver_reason_for_diagnosis(self):
+        wifi_manager_c = read("components/wifi_manager/wifi_manager.c")
+
+        self.assertIn("wifi_event_sta_disconnected_t", wifi_manager_c)
+        self.assertIn("wifi_manager_disconnect_reason_to_string", wifi_manager_c)
+        self.assertIn("disconnected: reason=%u", wifi_manager_c)
+        self.assertIn("WIFI_REASON_BEACON_TIMEOUT", wifi_manager_c)
+
+    def test_wifi_transient_reconnect_failure_keeps_saved_credentials(self):
+        wifi_manager_c = read("components/wifi_manager/wifi_manager.c")
+
+        self.assertIn("clear_credentials_on_failure", wifi_manager_c)
+        self.assertIn("command == WIFI_CMD_START", wifi_manager_c)
+        self.assertIn("if (clear_credentials_on_failure) {", wifi_manager_c)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,9 @@
 static const char *TAG = "app_radar";
 
 #define FALLGUARD_RADAR_STATUS_LOG_INTERVAL_MS 1000
+#define FALLGUARD_RADAR_HEIGHT_RELOAD_INTERVAL_MS 1000
+#define FALLGUARD_RADAR_HEIGHT_EPSILON_M 0.005f
+#define FALLGUARD_RADAR_PROFILE_SEND_REPEATS 3
 
 typedef enum {
     RADAR_PROFILE_STEP_HEIGHT = 0,
@@ -52,6 +55,12 @@ static bool s_latest_is_fall_valid;
 static float s_latest_target_height_m;
 static bool s_latest_target_height_valid;
 static float s_configured_radar_height_m;
+static TickType_t s_last_height_reload_tick;
+
+static float app_abs_float(float value)
+{
+    return value < 0.0f ? -value : value;
+}
 
 static const char *app_radar_project_to_string(ld6002c_project_t project)
 {
@@ -183,11 +192,22 @@ static void app_on_params(const ld6002c_params_t *params)
              params->rect_XR,
              params->rect_ZF,
              params->rect_ZB);
+
+    if (app_abs_float(params->high - s_configured_radar_height_m) > 0.05f) {
+        ESP_LOGW(TAG, "Radar install height readback mismatch: configured=%.2f readback=%.2f",
+                 (double)s_configured_radar_height_m,
+                 (double)params->high);
+    }
 }
 
 static void app_handle_radar_profile_result(radar_profile_step_t expected_step, uint8_t result)
 {
     if (!s_radar_profile_command_in_flight || s_radar_profile_step != expected_step) {
+        if (result == 1U) {
+            ESP_LOGD(TAG, "Duplicate radar profile ack ignored for %s",
+                     app_radar_profile_step_to_string(expected_step));
+            return;
+        }
         ESP_LOGW(TAG, "Unexpected radar profile ack for %s (in_flight=%s current_step=%s result=%u)",
                  app_radar_profile_step_to_string(expected_step),
                  s_radar_profile_command_in_flight ? "true" : "false",
@@ -205,7 +225,12 @@ static void app_handle_radar_profile_result(radar_profile_step_t expected_step, 
         return;
     }
 
-    ESP_LOGI(TAG, "Radar profile step applied: %s", app_radar_profile_step_to_string(expected_step));
+    if (expected_step == RADAR_PROFILE_STEP_HEIGHT) {
+        ESP_LOGI(TAG, "Radar install height applied: %.2f m",
+                 (double)s_configured_radar_height_m);
+    } else {
+        ESP_LOGI(TAG, "Radar profile step applied: %s", app_radar_profile_step_to_string(expected_step));
+    }
     switch (expected_step) {
     case RADAR_PROFILE_STEP_HEIGHT:
         s_radar_profile_step = RADAR_PROFILE_STEP_THRESHOLD;
@@ -444,48 +469,132 @@ static void app_maybe_retry_params(void)
     app_try_query_params("retry");
 }
 
-static void app_maybe_apply_radar_profile(void)
+static void app_maybe_reload_radar_height(void)
+{
+    const TickType_t now = xTaskGetTickCount();
+    float saved_height_m = s_configured_radar_height_m;
+
+    if (!s_radar_initialized || s_radar_profile_command_in_flight) {
+        return;
+    }
+
+    if ((now - s_last_height_reload_tick) <
+        pdMS_TO_TICKS(FALLGUARD_RADAR_HEIGHT_RELOAD_INTERVAL_MS)) {
+        return;
+    }
+    s_last_height_reload_tick = now;
+
+    esp_err_t err = wifi_manager_get_radar_height_m(&saved_height_m);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Radar install height reload failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    if (app_abs_float(saved_height_m - s_configured_radar_height_m) <=
+        FALLGUARD_RADAR_HEIGHT_EPSILON_M) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Radar install height changed: %.2f m -> %.2f m; reapplying profile",
+             (double)s_configured_radar_height_m,
+             (double)saved_height_m);
+    s_configured_radar_height_m = saved_height_m;
+    s_radar_profile_step = RADAR_PROFILE_STEP_HEIGHT;
+    s_params_received = false;
+    s_params_unavailable = false;
+    s_param_query_attempts = 0;
+    s_param_query_last_tick = 0;
+}
+
+static esp_err_t app_send_radar_profile_step(radar_profile_step_t step)
 {
     esp_err_t err = ESP_OK;
 
-    if (!s_radar_initialized || !s_radar_stream_seen || s_radar_profile_command_in_flight) {
+    for (uint8_t attempt = 0; attempt < FALLGUARD_RADAR_PROFILE_SEND_REPEATS; ++attempt) {
+        switch (step) {
+        case RADAR_PROFILE_STEP_HEIGHT:
+            err = ld6002c_set_height(s_configured_radar_height_m);
+            break;
+        case RADAR_PROFILE_STEP_THRESHOLD:
+            err = ld6002c_set_threshold(FALLGUARD_RADAR_THRESHOLD_M);
+            break;
+        case RADAR_PROFILE_STEP_SENSITIVITY:
+            err = ld6002c_set_sensitivity(FALLGUARD_RADAR_SENSITIVITY);
+            break;
+        case RADAR_PROFILE_STEP_ALARM_ZONE:
+            err = ld6002c_set_alarm_zone(FALLGUARD_RADAR_ZONE_BOUNDARY_M,
+                                         FALLGUARD_RADAR_ZONE_BOUNDARY_M,
+                                         FALLGUARD_RADAR_ZONE_BOUNDARY_M,
+                                         FALLGUARD_RADAR_ZONE_BOUNDARY_M);
+            break;
+        case RADAR_PROFILE_STEP_DONE:
+        case RADAR_PROFILE_STEP_FAILED:
+        default:
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
+    return ESP_OK;
+}
+
+static void app_send_full_radar_profile(void)
+{
+    static const radar_profile_step_t steps[] = {
+        RADAR_PROFILE_STEP_HEIGHT,
+        RADAR_PROFILE_STEP_THRESHOLD,
+        RADAR_PROFILE_STEP_SENSITIVITY,
+        RADAR_PROFILE_STEP_ALARM_ZONE,
+    };
+
+    if (!s_radar_initialized) {
         return;
     }
 
-    switch (s_radar_profile_step) {
-    case RADAR_PROFILE_STEP_HEIGHT:
-        err = ld6002c_set_height(s_configured_radar_height_m);
-        break;
-    case RADAR_PROFILE_STEP_THRESHOLD:
-        err = ld6002c_set_threshold(FALLGUARD_RADAR_THRESHOLD_M);
-        break;
-    case RADAR_PROFILE_STEP_SENSITIVITY:
-        err = ld6002c_set_sensitivity(FALLGUARD_RADAR_SENSITIVITY);
-        break;
-    case RADAR_PROFILE_STEP_ALARM_ZONE:
-        err = ld6002c_set_alarm_zone(FALLGUARD_RADAR_ZONE_BOUNDARY_M,
-                                     FALLGUARD_RADAR_ZONE_BOUNDARY_M,
-                                     FALLGUARD_RADAR_ZONE_BOUNDARY_M,
-                                     FALLGUARD_RADAR_ZONE_BOUNDARY_M);
-        break;
-    case RADAR_PROFILE_STEP_DONE:
-    case RADAR_PROFILE_STEP_FAILED:
-    default:
-        return;
+    for (size_t i = 0; i < (sizeof(steps) / sizeof(steps[0])); ++i) {
+        esp_err_t err = app_send_radar_profile_step(steps[i]);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to send radar profile step %s: %s",
+                     app_radar_profile_step_to_string(steps[i]),
+                     esp_err_to_name(err));
+            s_radar_profile_step = RADAR_PROFILE_STEP_FAILED;
+            return;
+        }
     }
 
+    s_radar_profile_command_in_flight = false;
+    s_radar_profile_command_tick = 0;
+    s_radar_profile_step = RADAR_PROFILE_STEP_DONE;
+    ESP_LOGI(TAG,
+             "Radar profile commands sent: height=%.2f threshold=%.2f sensitivity=%lu zone=[%.2f %.2f %.2f %.2f] repeats=%u",
+             (double)s_configured_radar_height_m,
+             (double)FALLGUARD_RADAR_THRESHOLD_M,
+             (unsigned long)FALLGUARD_RADAR_SENSITIVITY,
+             (double)FALLGUARD_RADAR_ZONE_BOUNDARY_M,
+             (double)FALLGUARD_RADAR_ZONE_BOUNDARY_M,
+             (double)FALLGUARD_RADAR_ZONE_BOUNDARY_M,
+             (double)FALLGUARD_RADAR_ZONE_BOUNDARY_M,
+             (unsigned int)FALLGUARD_RADAR_PROFILE_SEND_REPEATS);
+
+    esp_err_t err = ld6002c_get_params();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send radar profile step %s: %s",
-                 app_radar_profile_step_to_string(s_radar_profile_step),
-                 esp_err_to_name(err));
-        s_radar_profile_step = RADAR_PROFILE_STEP_FAILED;
+        ESP_LOGW(TAG, "Radar parameter query after profile send failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void app_maybe_apply_radar_profile(void)
+{
+    if (!s_radar_initialized || s_radar_profile_command_in_flight) {
         return;
     }
 
-    s_radar_profile_command_in_flight = true;
-    s_radar_profile_command_tick = xTaskGetTickCount();
-    ESP_LOGI(TAG, "Radar profile command sent: %s",
-             app_radar_profile_step_to_string(s_radar_profile_step));
+    if (s_radar_profile_step != RADAR_PROFILE_STEP_DONE &&
+        s_radar_profile_step != RADAR_PROFILE_STEP_FAILED) {
+        app_send_full_radar_profile();
+    }
 }
 
 static void app_maybe_timeout_radar_profile(void)
@@ -534,6 +643,7 @@ static void app_radar_reset_state(void)
     s_latest_target_height_m = 0.0f;
     s_latest_target_height_valid = false;
     s_configured_radar_height_m = FALLGUARD_RADAR_HEIGHT_M;
+    s_last_height_reload_tick = 0;
 }
 
 esp_err_t app_radar_init(void)
@@ -567,7 +677,8 @@ esp_err_t app_radar_init(void)
                  (double)s_configured_radar_height_m,
                  esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "Using radar install height %.2f m", (double)s_configured_radar_height_m);
+        ESP_LOGI(TAG, "Using saved/default radar install height %.2f m",
+                 (double)s_configured_radar_height_m);
     }
 
     err = ld6002c_init(&radar_config);
@@ -579,6 +690,8 @@ esp_err_t app_radar_init(void)
 
     s_radar_initialized = true;
     ESP_LOGI(TAG, "Radar init complete");
+
+    app_maybe_apply_radar_profile();
 
 #if !FALLGUARD_ENABLE_USER_LOG
     err = ld6002c_set_user_log(false);
@@ -607,6 +720,7 @@ void app_radar_process(void)
     app_maybe_enable_3d_cloud();
     app_maybe_log_3d_diagnostic();
     app_maybe_timeout_radar_profile();
+    app_maybe_reload_radar_height();
     app_maybe_apply_radar_profile();
     app_maybe_retry_params();
 }
